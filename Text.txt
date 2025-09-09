@@ -1,0 +1,14 @@
+unmatched_sorted_cap = (
+    unmatched
+    .unique()
+    .sort(["Betriebstag", "_ZN"])
+    .group_by("Betriebstag")
+    .agg(pl.col("_ZN").implode().alias("_zn_list"))
+    .with_columns(
+        pl.col("_zn_list").map_elements(
+            lambda lst: ", ".join(sorted(lst)[:unmatched_list_cap]) if lst else "",
+            return_dtype=pl.Utf8
+        ).alias("Unmatched Züge Liste")
+    )
+    .drop("_zn_list")
+)
