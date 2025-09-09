@@ -1,0 +1,62 @@
+# ---- UNMATCHED: Halte-Züge ohne Linien-Match
+    # distinct ZN pro Tag aus Halte → anti-join gegen Mapping
+    unmatched = (
+        df_halte
+        .select(["Betriebstag", "_ZN"])
+        .unique()
+        .join(map_df.select(["_ZN_MAP"]), left_on="_ZN", right_on="_ZN_MAP", how="anti")
+    )
+    # pro Tag: count + Liste (gekappt)
+    unmatched_per_day = (
+        unmatched
+        .group_by("Betriebstag")
+        .agg([
+            pl.col("_ZN").n_unique().alias("Unmatched Züge (distinct)"),
+            # Liste als String (gekappt)
+            pl.col("_ZN").unique().sort().head(unmatched_list_cap).arr.join(", ").alias("Unmatched Züge Liste"),
+        ])
+    )
+
+    # (optional) Detail-CSV mit allen unmatched ZN
+    if unmatched_detail_csv:
+        detail_path = cache_dir / f"{cfg_key}_unmatched_detail.csv"
+        unmatched.sort(["Betriebstag", "_ZN"]).write_csv(detail_path)
+        logger.info(f"Unmatched-Detail geschrieben: {detail_path}")
+
+    # ---- Aggregation pro Tag & Linie
+    per_day_line = (
+        df_line
+        .group_by(["Betriebstag", "Linie"])
+        .agg([
+            pl.len().alias("Halte"),
+            pl.col("puenktlich").sum().cast(pl.Int64).alias("pü Halte"),
+            (pl.col("puenktlich").sum() / pl.len()).alias("PÜ-Quote"),
+            pl.col("vsp").median().alias("Median vsp"),
+            pl.col("_ZN").n_unique().alias("N Züge (distinct)"),
+        ])
+    )
+
+    # ---- auf Tagesniveau erweitern + KW + Unmatched mergen
+    per_day = (
+        per_day_line
+        .with_columns(pl.col("Betriebstag").dt.week().alias("KW"))
+        .sort(["Betriebstag", "Linie"])
+    )
+
+    # Wir wollen die Unmatched-Infos unabhängig von „Linie“ sichtbar machen.
+    # Variante A: pro Linie redundant anhängen (einfachster Merge):
+    per_day = (
+        per_day
+        .join(unmatched_per_day, on="Betriebstag", how="left")
+        .with_columns([
+            pl.col("Unmatched Züge (distinct)").fill_null(0),
+            pl.col("Unmatched Züge Liste").fill_null(""),
+        ])
+    )
+
+    # (Alternative Variante B: zusätzlich eine „Linie=__ALL__“-Zeile je Tag mit nur den Unmatched-Werten erzeugen.)
+
+    # ---- Cache
+    per_day.write_csv(cache_file)
+    logger.success(f"Linien-Pünktlichkeit geschrieben: {cache_file}")
+    return per_day
