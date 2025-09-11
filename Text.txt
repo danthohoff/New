@@ -1,0 +1,511 @@
+# analytics_bundle.py
+from __future__ import annotations
+import re
+import math
+import datetime as dt
+from pathlib import Path
+import polars as pl
+
+
+# ======================
+# ZLM einlesen (UTF-8)
+# ======================
+def read_zlm_range(
+    root: Path,
+    produkt: str,
+    tage: list[dt.date],
+    *,
+    separator: str = ":",
+    decimal_comma: bool = True,
+    need_cols: tuple[str, ...] = ("istzeit", "zn", "bst", "fsStatus", "vsp"),
+) -> pl.DataFrame:
+    files = [
+        p for d in tage
+        for p in (root / "zlm_lean" / produkt).glob(f"*_{d:%Y%m%d}_*.csv")
+    ]
+    if not files:
+        raise ValueError("Keine zlm-Dateien im Zeitraum gefunden.")
+
+    def _read_one(path: Path) -> pl.DataFrame:
+        df = pl.read_csv(
+            path,
+            separator=separator,
+            decimal_comma=decimal_comma,
+            infer_schema_length=2000,
+        )
+        df = df.select([c for c in need_cols if c in df.columns])
+
+        casts = []
+        if "istzeit" in df.columns:
+            casts.append(pl.col("istzeit").str.strptime(pl.Datetime, "%Y-%m-%d %H:%M:%S", strict=False).alias("istzeit_dt"))
+        if "zn" in df.columns:
+            casts.append(pl.col("zn").cast(pl.Utf8))
+        if "bst" in df.columns:
+            casts.append(pl.col("bst").cast(pl.Utf8))
+        if "fsStatus" in df.columns:
+            casts.append(pl.col("fsStatus").cast(pl.Int64, strict=False))
+        if "vsp" in df.columns:
+            casts.append(pl.col("vsp").cast(pl.Int64, strict=False))
+        df = df.with_columns(casts)
+
+        # Betriebstag = erstes Datum im Dateinamen (robust)
+        dates = re.findall(r"(\d{8})", str(path))
+        if not dates:
+            raise ValueError(f"Kann Datum nicht aus Dateinamen parsen: {path}")
+        s = dates[0]
+        btag = dt.date(int(s[:4]), int(s[4:6]), int(s[6:8]))
+
+        return df.with_columns(pl.lit(btag).alias("Betriebstag"))
+
+    return pl.concat([_read_one(p) for p in files], how="vertical_relaxed")
+
+
+# =================================
+# Selektoren (BST / ZN / Linien)
+# =================================
+def select_trains_by_bst(df_ev: pl.DataFrame, auswahl_bst: list[str], selection_mode: str = "any") -> pl.DataFrame:
+    """Liefert (Betriebstag, zn) der betroffenen Züge (ODER:'any', UND:'all')."""
+    auswahl_bst = [str(x).strip() for x in (auswahl_bst or [])]
+    if not auswahl_bst:
+        return pl.DataFrame({"Betriebstag": [], "zn": []}, schema={"Betriebstag": pl.Date, "zn": pl.Utf8})
+
+    zlm_on_req = df_ev.filter(pl.col("bst").is_in(auswahl_bst)).select(["Betriebstag", "zn", "bst"])
+
+    if selection_mode == "any":  # ODER
+        return zlm_on_req.select(["Betriebstag", "zn"]).unique()
+
+    if selection_mode == "all":  # UND
+        cover = zlm_on_req.group_by(["Betriebstag", "zn"]).agg(pl.col("bst").n_unique().alias("covered"))
+        return cover.filter(pl.col("covered") == len(set(auswahl_bst))).select(["Betriebstag", "zn"])
+
+    raise ValueError("selection_mode muss 'any' oder 'all' sein")
+
+
+def select_trains_by_zn(df_ev: pl.DataFrame, zugnummern: list[str]) -> pl.DataFrame:
+    zns = [str(z) for z in (zugnummern or [])]
+    if not zns:
+        return pl.DataFrame({"Betriebstag": [], "zn": []}, schema={"Betriebstag": pl.Date, "zn": pl.Utf8})
+
+    return df_ev.filter(pl.col("zn").is_in(zns)).select(["Betriebstag", "zn"]).unique()
+
+
+def load_line_mapping(mapping_csv: Path, zn_col: str = "Zugnummer", line_col: str = "Nr") -> pl.DataFrame:
+    return (
+        pl.read_csv(mapping_csv)
+          .select([zn_col, line_col])
+          .with_columns([
+              pl.col(zn_col).cast(pl.Utf8).alias("_ZN_MAP"),
+              pl.col(line_col).cast(pl.Utf8).alias("Linie"),
+          ])
+          .select(["_ZN_MAP", "Linie"])
+          .unique()
+    )
+
+
+def select_trains_by_line(df_ev: pl.DataFrame, map_df: pl.DataFrame, linien: list[str]) -> pl.DataFrame:
+    linien = [str(x) for x in (linien or [])]
+    if not linien:
+        return pl.DataFrame({"Betriebstag": [], "zn": []}, schema={"Betriebstag": pl.Date, "zn": pl.Utf8})
+
+    return (
+        df_ev.select(["Betriebstag", "zn"]).unique()
+             .with_columns(pl.col("zn").alias("_ZN"))
+             .join(map_df, left_on="_ZN", right_on="_ZN_MAP", how="inner")
+             .filter(pl.col("Linie").is_in(linien))
+             .select(["Betriebstag", "zn"])
+             .unique()
+    )
+
+
+# =========================================
+# Tages-Metriken: (A) Gebiet  vor/auf/nach
+# =========================================
+def daily_metrics_area(df_ev: pl.DataFrame, selected_trains: pl.DataFrame, *, ontime_sec: int = 360) -> pl.DataFrame:
+    """
+    Erwartet df_ev mit: Betriebstag, zn, bst, istzeit_dt, fsStatus, vsp
+    selected_trains: (Betriebstag, zn) – von select_trains_by_bst(...)
+    Liefert Tageswerte inkl. vor/auf/nach (Auswahl) + "andere".
+    """
+    if selected_trains.height == 0:
+        # leeres Ergebnis-Grundgerüst je Tag
+        base_days = df_ev.select("Betriebstag").unique().sort("Betriebstag")
+        return base_days.with_columns([
+            pl.lit(0).alias("Züge Auswahl"), pl.lit(0).alias("Züge andere"),
+            pl.lit(0).alias("Halte Auswahl vor"), pl.lit(0).alias("Halte Auswahl auf"), pl.lit(0).alias("Halte Auswahl nach"),
+            pl.lit(0).alias("pü Halte Auswahl vor"), pl.lit(0).alias("pü Halte Auswahl auf"), pl.lit(0).alias("pü Halte Auswahl nach"),
+            pl.lit(0).alias("Halte andere"), pl.lit(0).alias("pü Halte andere"),
+        ]).with_columns([
+            (pl.col("Züge Auswahl") + pl.col("Züge andere")).alias("Züge alle"),
+            (pl.col("Halte Auswahl vor") + pl.col("Halte Auswahl auf") + pl.col("Halte Auswahl nach") + pl.col("Halte andere")).alias("Halte alle"),
+            (pl.col("pü Halte Auswahl vor") + pl.col("pü Halte Auswahl auf") + pl.col("pü Halte Auswahl nach") + pl.col("pü Halte andere")).alias("pü Halte alle"),
+            pl.col("Betriebstag").dt.week().alias("KW"),
+        ])
+
+    base = df_ev.join(selected_trains, on=["Betriebstag", "zn"], how="inner")
+    ein_aus = (
+        base.group_by(["Betriebstag", "zn"])
+            .agg([
+                pl.col("istzeit_dt").min().alias("einfahrt"),
+                pl.col("istzeit_dt").max().alias("ausfahrt"),
+            ])
+    )
+
+    df_halte = (
+        df_ev.filter(pl.col("fsStatus").is_in([1, 3]))
+             .select(["Betriebstag", "zn", "istzeit_dt", "vsp"])
+    )
+
+    halte_sel = (
+        df_halte.join(ein_aus, on=["Betriebstag", "zn"], how="inner")
+                .with_columns([
+                    pl.when(pl.col("istzeit_dt") < pl.col("einfahrt")).then(pl.lit("vor"))
+                     .when(pl.col("istzeit_dt") <= pl.col("ausfahrt")).then(pl.lit("auf"))
+                     .otherwise(pl.lit("nach")).alias("phase"),
+                    (pl.col("vsp") < ontime_sec).alias("puenktlich"),
+                ])
+                .group_by(["Betriebstag", "phase"])
+                .agg([
+                    pl.len().alias("halte"),
+                    pl.col("puenktlich").sum().cast(pl.Int64).alias("pue_halte"),
+                    pl.col("vsp").median().alias("median_vsp"),
+                ])
+                .pivot(values=["halte", "pue_halte", "median_vsp"], index="Betriebstag", columns="phase")
+    )
+    for base_name, fill in [("halte", 0), ("pue_halte", 0), ("median_vsp", None)]:
+        for ph in ("vor", "auf", "nach"):
+            col = f"{base_name}_{ph}"
+            if col not in halte_sel.columns:
+                halte_sel = halte_sel.with_columns(pl.lit(fill).alias(col))
+    halte_sel = halte_sel.rename({
+        "halte_vor": "Halte Auswahl vor", "halte_auf": "Halte Auswahl auf", "halte_nach": "Halte Auswahl nach",
+        "pue_halte_vor": "pü Halte Auswahl vor", "pue_halte_auf": "pü Halte Auswahl auf", "pue_halte_nach": "pü Halte Auswahl nach",
+        "median_vsp_vor": "Median vsp Auswahl vor", "median_vsp_auf": "Median vsp Auswahl auf", "median_vsp_nach": "Median vsp Auswahl nach",
+    })
+
+    df_halte_andere = (
+        df_halte.join(selected_trains, on=["Betriebstag", "zn"], how="anti")
+                .with_columns((pl.col("vsp") < ontime_sec).alias("puenktlich"))
+                .group_by("Betriebstag")
+                .agg([
+                    pl.len().alias("Halte andere"),
+                    pl.col("puenktlich").sum().cast(pl.Int64).alias("pü Halte andere"),
+                    pl.col("vsp").median().alias("Median vsp andere"),
+                ])
+    )
+
+    zuege_auswahl_t = selected_trains.group_by("Betriebstag").len().rename({"len": "Züge Auswahl"})
+    zuege_andere_t = (
+        df_ev.select(["Betriebstag", "zn"]).unique()
+             .join(selected_trains, on=["Betriebstag", "zn"], how="anti")
+             .group_by("Betriebstag").len().rename({"len": "Züge andere"})
+    )
+
+    per_day = (
+        df_ev.select("Betriebstag").unique().sort("Betriebstag")
+             .join(zuege_auswahl_t, on="Betriebstag", how="left")
+             .join(zuege_andere_t, on="Betriebstag", how="left")
+             .join(halte_sel, on="Betriebstag", how="left")
+             .join(df_halte_andere, on="Betriebstag", how="left")
+             .with_columns([
+                 pl.col("Züge Auswahl").fill_null(0),
+                 pl.col("Züge andere").fill_null(0),
+                 pl.col("Halte andere").fill_null(0),
+                 pl.col("pü Halte andere").fill_null(0),
+             ])
+             .with_columns((pl.col("Züge Auswahl") + pl.col("Züge andere")).alias("Züge alle"))
+             .with_columns((pl.col("Halte Auswahl vor") + pl.col("Halte Auswahl auf") + pl.col("Halte Auswahl nach") + pl.col("Halte andere")).alias("Halte alle"))
+             .with_columns((pl.col("pü Halte Auswahl vor") + pl.col("pü Halte Auswahl auf") + pl.col("pü Halte Auswahl nach") + pl.col("pü Halte andere")).alias("pü Halte alle"))
+             .with_columns(pl.col("Betriebstag").dt.week().alias("KW"))
+    )
+    return per_day
+
+
+# ======================================================
+# Tages-Metriken: (B) Zug-/Linienfilter (kein vor/auf/nach)
+# ======================================================
+def daily_metrics_simple(df_ev: pl.DataFrame, selected_trains: pl.DataFrame, *, ontime_sec: int = 360) -> pl.DataFrame:
+    """Auswahl vs Andere – ohne Phasen. Für Filter per ZN oder Linie."""
+    if selected_trains.height == 0:
+        base_days = df_ev.select("Betriebstag").unique().sort("Betriebstag")
+        return base_days.with_columns([
+            pl.lit(0).alias("Züge Auswahl"), pl.lit(0).alias("Züge andere"),
+            pl.lit(0).alias("Halte Auswahl"), pl.lit(0).alias("pü Halte Auswahl"),
+            pl.lit(0).alias("Halte andere"), pl.lit(0).alias("pü Halte andere"),
+        ]).with_columns([
+            (pl.col("Züge Auswahl") + pl.col("Züge andere")).alias("Züge alle"),
+            (pl.col("Halte Auswahl") + pl.col("Halte andere")).alias("Halte alle"),
+            (pl.col("pü Halte Auswahl") + pl.col("pü Halte andere")).alias("pü Halte alle"),
+            pl.col("Betriebstag").dt.week().alias("KW"),
+        ])
+
+    df_halte = (
+        df_ev.filter(pl.col("fsStatus").is_in([1, 3]))
+             .with_columns((pl.col("vsp") < ontime_sec).alias("puenktlich"))
+             .select(["Betriebstag", "zn", "vsp", "puenktlich"])
+    )
+    sel_halte = (
+        df_halte.join(selected_trains, on=["Betriebstag", "zn"], how="inner")
+                .group_by("Betriebstag")
+                .agg([
+                    pl.len().alias("Halte Auswahl"),
+                    pl.col("puenktlich").sum().cast(pl.Int64).alias("pü Halte Auswahl"),
+                    pl.col("vsp").median().alias("Median vsp Auswahl"),
+                ])
+    )
+    andere_halte = (
+        df_halte.join(selected_trains, on=["Betriebstag", "zn"], how="anti")
+                .group_by("Betriebstag")
+                .agg([
+                    pl.len().alias("Halte andere"),
+                    pl.col("puenktlich").sum().cast(pl.Int64).alias("pü Halte andere"),
+                    pl.col("vsp").median().alias("Median vsp andere"),
+                ])
+    )
+    zuege_auswahl_t = selected_trains.group_by("Betriebstag").len().rename({"len": "Züge Auswahl"})
+    zuege_andere_t = (
+        df_ev.select(["Betriebstag", "zn"]).unique()
+             .join(selected_trains, on=["Betriebstag", "zn"], how="anti")
+             .group_by("Betriebstag").len().rename({"len": "Züge andere"})
+    )
+
+    per_day = (
+        df_ev.select("Betriebstag").unique().sort("Betriebstag")
+             .join(zuege_auswahl_t, on="Betriebstag", how="left")
+             .join(zuege_andere_t, on="Betriebstag", how="left")
+             .join(sel_halte, on="Betriebstag", how="left")
+             .join(andere_halte, on="Betriebstag", how="left")
+             .with_columns([
+                 pl.col("Züge Auswahl").fill_null(0),
+                 pl.col("Züge andere").fill_null(0),
+                 pl.col("Halte Auswahl").fill_null(0),
+                 pl.col("pü Halte Auswahl").fill_null(0),
+                 pl.col("Halte andere").fill_null(0),
+                 pl.col("pü Halte andere").fill_null(0),
+             ])
+             .with_columns((pl.col("Züge Auswahl") + pl.col("Züge andere")).alias("Züge alle"))
+             .with_columns((pl.col("Halte Auswahl") + pl.col("Halte andere")).alias("Halte alle"))
+             .with_columns((pl.col("pü Halte Auswahl") + pl.col("pü Halte andere")).alias("pü Halte alle"))
+             .with_columns(pl.col("Betriebstag").dt.week().alias("KW"))
+    )
+    return per_day
+
+
+# ======================================
+# Routen aus zlm + Kanten-Zählungen
+# ======================================
+def route_counts(df_ev: pl.DataFrame, selected_trains: pl.DataFrame | None = None) -> pl.DataFrame:
+    """
+    Gibt Kanten-Zählungen zurück:
+      prev_bst, bst, is_selected, n
+    Wenn selected_trains=None → alles als is_selected=False.
+    """
+    df_trans = (
+        df_ev.sort(["Betriebstag", "zn", "istzeit_dt"])
+             .with_columns(pl.col("bst").shift(1).over(["Betriebstag", "zn"]).alias("prev_bst"))
+             .filter(pl.col("prev_bst").is_not_null())
+             .select(["Betriebstag", "zn", "prev_bst", "bst"])
+    )
+    if selected_trains is not None:
+        flags = selected_trains.with_columns(pl.lit(True).alias("is_selected"))
+        df_trans = (
+            df_trans.join(flags, on=["Betriebstag", "zn"], how="left")
+                    .with_columns(pl.col("is_selected").fill_null(False))
+        )
+    else:
+        df_trans = df_trans.with_columns(pl.lit(False).alias("is_selected"))
+
+    return (
+        df_trans.group_by(["prev_bst", "bst", "is_selected"])
+                .agg(pl.len().alias("n"))
+                .sort(["is_selected", "n"], descending=[True, True])
+    )
+
+
+# ================================================
+# Kanten-CSV (von_bst/bis_bst/Strecke/latlon) laden
+# ================================================
+def _parse_latlon_expr(col: str) -> tuple[pl.Expr, pl.Expr]:
+    cleaned = pl.col(col).cast(pl.Utf8).str.replace_all(r"[^\d\.\-\,\s]", "")
+    parts = cleaned.str.split(by=r"[,\s]+", inclusive=False)
+    lat = parts.arr.get(0).cast(pl.Float64)
+    lon = parts.arr.get(1).cast(pl.Float64)
+    return lat, lon
+
+
+def load_edge_coords(edge_csv_path: str | Path) -> pl.DataFrame:
+    """
+    Erwartet Spalten: von_bst, bis_bst, Strecke, von_latlon, bis_latlon
+    Liefert gerichtete Kanten (u,v) mit Koordinaten (u_lat/u_lon/v_lat/v_lon),
+    in BEIDEN Richtungen (dupliziert).
+    """
+    df = pl.read_csv(edge_csv_path)
+
+    lat_von, lon_von = _parse_latlon_expr("von_latlon")
+    lat_bis, lon_bis = _parse_latlon_expr("bis_latlon")
+
+    df = df.with_columns([
+        lat_von.alias("von_lat"), lon_von.alias("von_lon"),
+        lat_bis.alias("bis_lat"), lon_bis.alias("bis_lon"),
+        pl.col("von_bst").cast(pl.Utf8),
+        pl.col("bis_bst").cast(pl.Utf8),
+        pl.col("Strecke").cast(pl.Utf8),
+    ])
+
+    fwd = df.select([
+        pl.col("von_bst").alias("u"),
+        pl.col("bis_bst").alias("v"),
+        pl.col("Strecke"),
+        pl.col("von_lat").alias("u_lat"),
+        pl.col("von_lon").alias("u_lon"),
+        pl.col("bis_lat").alias("v_lat"),
+        pl.col("bis_lon").alias("v_lon"),
+    ])
+    rev = df.select([
+        pl.col("bis_bst").alias("u"),
+        pl.col("von_bst").alias("v"),
+        pl.col("Strecke"),
+        pl.col("bis_lat").alias("u_lat"),
+        pl.col("bis_lon").alias("u_lon"),
+        pl.col("von_lat").alias("v_lat"),
+        pl.col("von_lon").alias("v_lon"),
+    ])
+    edges_dir = pl.concat([fwd, rev]).unique(subset=["u", "v", "Strecke"])
+    return edges_dir
+
+
+# ================================
+# Folium-Karte aus Kanten-Zählung
+# ================================
+def folium_map_from_counts_with_edges(
+    counts: pl.DataFrame,
+    edges_dir: pl.DataFrame,
+    *,
+    outfile: str | Path,
+    selected_color: str = "#0a84ff",
+    other_color: str = "#999999",
+    min_weight: float = 1.0,
+    max_weight: float = 8.0,
+    filter_strecken: list[str] | None = None,
+) -> str:
+    import folium
+
+    if filter_strecken:
+        edges_dir = edges_dir.filter(pl.col("Strecke").is_in([str(x) for x in filter_strecken]))
+
+    cc = counts.rename({"prev_bst": "u", "bst": "v"}).join(edges_dir, on=["u", "v"], how="left")
+    cc = cc.filter(pl.col("u_lat").is_not_null() & pl.col("v_lat").is_not_null())
+
+    # Map-Zentrum (grob)
+    if cc.height:
+        lat_center = float((cc["u_lat"].mean() + cc["v_lat"].mean()) / 2)
+        lon_center = float((cc["u_lon"].mean() + cc["v_lon"].mean()) / 2)
+    else:
+        lat_center, lon_center = 51.0, 10.0
+
+    m = folium.Map(location=[lat_center, lon_center], zoom_start=7, control_scale=True, tiles="cartodbpositron")
+
+    n_max = int(cc["n"].max()) if cc.height else 1
+
+    def w(n: int) -> float:
+        if n_max <= 1:
+            return min_weight
+        x = math.log10(1 + float(n)) / math.log10(1 + float(n_max))
+        return min_weight + (max_weight - min_weight) * x
+
+    fg_sel = folium.FeatureGroup(name="Auswahl", overlay=True, show=True)
+    fg_oth = folium.FeatureGroup(name="Andere", overlay=True, show=True)
+
+    for row in cc.iter_rows(named=True):
+        latlon = [(row["u_lat"], row["u_lon"]), (row["v_lat"], row["v_lon"])]
+        color = selected_color if row["is_selected"] else other_color
+        strecke = row.get("Strecke", "")
+        tooltip = f"{row['u']} → {row['v']} | n={row['n']}" + (f" | Strecke {strecke}" if strecke else "")
+        folium.PolyLine(latlon, color=color, weight=w(row["n"]), opacity=0.85, tooltip=tooltip)\
+              .add_to(fg_sel if row["is_selected"] else fg_oth)
+
+    fg_sel.add_to(m); fg_oth.add_to(m); folium.LayerControl().add_to(m)
+    m.save(str(outfile))
+    return str(outfile)
+
+
+
+# example_usage.py
+from pathlib import Path
+import datetime as dt
+import polars as pl
+
+from analytics_bundle import (
+    read_zlm_range, select_trains_by_bst, select_trains_by_zn, load_line_mapping, select_trains_by_line,
+    daily_metrics_area, daily_metrics_simple, route_counts, load_edge_coords, folium_map_from_counts_with_edges
+)
+
+# ---- Konfiguration (ersetzen durch deine get_config/prepare_time_range) ----
+def get_config():
+    return {
+        "produkt": "dbFern",
+        "path_to_SQF_preprocessed": Path("/pfad/zu/SQF/SQF_data/zl_preprocessed"),  # zlm_lean liegt hier drunter
+        "path_to_data": Path("/pfad/zu/cache_out"),
+        "ausw_start": "2025-03-01",
+        "ausw_ende": "2025-03-10",
+        "auswahl_BST": ["FRA", "FED"],  # Beispiel
+    }
+
+def prepare_time_range(cfg):
+    d0 = dt.datetime.strptime(cfg["ausw_start"], "%Y-%m-%d").date()
+    d1 = dt.datetime.strptime(cfg["ausw_ende"], "%Y-%m-%d").date()
+    tage = []
+    d = d0
+    while d <= d1:
+        tage.append(d)
+        d += dt.timedelta(days=1)
+    return tage, cfg
+
+if __name__ == "__main__":
+    cfg = get_config()
+    tage, cfg = prepare_time_range(cfg)
+    out_dir = cfg["path_to_data"]; out_dir.mkdir(parents=True, exist_ok=True)
+
+    # 1) ZLM laden
+    df_ev = read_zlm_range(
+        root=cfg["path_to_SQF_preprocessed"],
+        produkt=cfg["produkt"],
+        tage=tage,
+        separator=":",       # ggf. ";" wenn Semikolon
+        decimal_comma=True,  # ggf. False, wenn Punkt-Dezimal
+    )
+
+    # ========== A) Gebiet (BST) – vor/auf/nach + Karte ==========
+    sel_trains_area = select_trains_by_bst(df_ev, cfg["auswahl_BST"], selection_mode="any")  # oder "all"
+    per_day_area = daily_metrics_area(df_ev, sel_trains_area, ontime_sec=360)
+    per_day_area.write_csv(out_dir / "area_metrics.csv")
+
+    # Karte: Routen der Auswahl vs. Andere anhand deiner Kanten-CSV
+    edges_dir = load_edge_coords("/pfad/zu/kanten.csv")  # Spalten: von_bst, bis_bst, Strecke, von_latlon, bis_latlon
+    counts_area = route_counts(df_ev, sel_trains_area)
+    html_area = folium_map_from_counts_with_edges(
+        counts_area, edges_dir, outfile=out_dir / "map_area.html"
+    )
+    print(f"Karte (Gebiet): {html_area}")
+
+    # ========== B) Zugnummern – Auswahl vs. Andere (ohne Phasen) ==========
+    zugnummern = ["12345", "67890"]  # Beispiel
+    sel_trains_zn = select_trains_by_zn(df_ev, zugnummern)
+    per_day_zn = daily_metrics_simple(df_ev, sel_trains_zn, ontime_sec=360)
+    per_day_zn.write_csv(out_dir / "zn_metrics.csv")
+    counts_zn = route_counts(df_ev, sel_trains_zn)
+    html_zn = folium_map_from_counts_with_edges(counts_zn, edges_dir, outfile=out_dir / "map_zn.html")
+    print(f"Karte (Zugnummern): {html_zn}")
+
+    # ========== C) Linien – Auswahl vs. Andere (ohne Phasen) ==========
+    map_df = load_line_mapping(Path("/pfad/zu/linien_mapping.csv"), zn_col="Zugnummer", line_col="Nr")
+    sel_trains_line = select_trains_by_line(df_ev, map_df, linien=["10", "20"])
+    per_day_line = daily_metrics_simple(df_ev, sel_trains_line, ontime_sec=360)
+    per_day_line.write_csv(out_dir / "line_metrics.csv")
+    counts_line = route_counts(df_ev, sel_trains_line)
+    html_line = folium_map_from_counts_with_edges(counts_line, edges_dir, outfile=out_dir / "map_line.html")
+    print(f"Karte (Linien): {html_line}")
+
+    # Optional: Ergebnisse ansehen
+    print("Area metrics:\n", per_day_area.head())
+    print("ZN metrics:\n", per_day_zn.head())
+    print("Line metrics:\n", per_day_line.head())
