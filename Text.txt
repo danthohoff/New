@@ -1,0 +1,102 @@
+import polars as pl
+
+def lu_hln_flaeche_per_day_node_based(
+    df_ev: pl.DataFrame,
+    seg_edges: pl.DataFrame,       # ['u','v','netz'] mit HLN/Flaeche in BEIDEN Richtungen
+    *,
+    default_to_flaeche: bool = True,
+    dedup_key: tuple[str, ...] = ("Betriebstag","zn","istzeit_dt","uc"),
+) -> pl.DataFrame:
+    """
+    Mapt LU (an BST) auf Abschnitt:
+      - normal: (prev_bst -> bst)
+      - Sonderfall Laufanfang: (bst -> next_bst)
+    Zählt pro Tag HLN/Fläche (optional 'Unbekannt' ≈ 0, wenn default_to_flaeche=True).
+    'LU alle' == klassische Zählung (gleiche Dedup-Regel).
+    """
+
+    # 0) klassische LU pro Tag (zum Abgleich) – gleiche Dedup-Regel
+    classic = (
+        df_ev.filter(pl.col("uc").is_not_null())
+             .select(["Betriebstag","zn","istzeit_dt","uc"])
+             .unique(subset=list(dedup_key))
+             .group_by("Betriebstag").agg(pl.len().alias("LU klassisch"))
+    )
+
+    # 1) chronologisch + prev_bst/next_bst je Lauf
+    ev_sorted = (
+        df_ev.sort(["Betriebstag","zn","istzeit_dt"])
+             .with_columns([
+                 pl.col("bst").shift(1).over(["Betriebstag","zn"]).alias("prev_bst"),
+                 pl.col("bst").shift(-1).over(["Betriebstag","zn"]).alias("next_bst"),
+             ])
+    )
+
+    # 2) nur LU-Zeilen, dedupliziert
+    lu_rows = (
+        ev_sorted.filter(pl.col("uc").is_not_null())
+                 .select(["Betriebstag","zn","istzeit_dt","uc","bst","prev_bst","next_bst"])
+                 .unique(subset=list(dedup_key))
+    )
+
+    if lu_rows.is_empty():
+        return (
+            df_ev.select("Betriebstag").unique().sort("Betriebstag")
+                 .with_columns([
+                     pl.lit(0).alias("LU HLN"),
+                     pl.lit(0).alias("LU Fläche"),
+                     pl.lit(0).alias("LU alle"),
+                     pl.lit(0).alias("LU klassisch"),
+                 ])
+        )
+
+    # 3) zwei Kanten-Labels vorbereiten:
+    #    a) „normal“ (prev_bst -> bst)
+    lu_l1 = (
+        lu_rows
+        .join(seg_edges, left_on=["prev_bst","bst"], right_on=["u","v"], how="left")
+        .rename({"netz":"netz_prev"})
+    )
+    #    b) „Startfall“ (bst -> next_bst), wenn prev_bst fehlt
+    lu_l2 = (
+        lu_l1
+        .join(seg_edges, left_on=["bst","next_bst"], right_on=["u","v"], how="left")
+        .rename({"netz":"netz_next"})
+    )
+
+    # 4) Netz final wählen:
+    #    - zuerst netz_prev (normaler Fall)
+    #    - sonst netz_next (Startfall)
+    #    - sonst Default (Fläche oder Unbekannt)
+    lu_labeled = (
+        lu_l2.with_columns(
+            pl.when(pl.col("netz_prev").is_not_null()).then(pl.col("netz_prev"))
+             .when(pl.col("netz_next").is_not_null()).then(pl.col("netz_next"))
+             .otherwise(pl.lit("Flaeche") if default_to_flaeche else pl.lit("Unbekannt"))
+             .alias("netz_final")
+        )
+        .select(["Betriebstag","zn","istzeit_dt","uc","netz_final"])
+        # Guard: falls joins mehrfachzeilen erzeugen → hart eindeutige LU
+        .unique(subset=["Betriebstag","zn","istzeit_dt","uc"])
+    )
+
+    # 5) Tagesweise HLN/Fläche zählen
+    per_day = (
+        lu_labeled.group_by(["Betriebstag","netz_final"])
+                  .agg(pl.len().alias("n"))
+                  .pivot(values="n", index="Betriebstag", columns="netz_final")
+    )
+    # fehlende Spalten füllen
+    for k in ("HLN","Flaeche","Unbekannt"):
+        if k not in per_day.columns:
+            per_day = per_day.with_columns(pl.lit(0).alias(k))
+
+    per_day = (
+        per_day.rename({"HLN":"LU HLN","Flaeche":"LU Fläche","Unbekannt":"LU Unbekannt"})
+               .with_columns((pl.col("LU HLN") + pl.col("LU Fläche") + pl.col("LU Unbekannt")).alias("LU alle"))
+               .sort("Betriebstag")
+               .join(classic, on="Betriebstag", how="left")
+               .with_columns(pl.col("LU klassisch").fill_null(0))
+    )
+
+    return per_day
