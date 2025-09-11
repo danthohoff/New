@@ -1,0 +1,20 @@
+def _first_present(df: pl.DataFrame, *candidates: str) -> str:
+    for c in candidates:
+        if c in df.columns:
+            return c
+    raise KeyError(f"Keine der Spalten gefunden: {candidates}")
+
+def _parse_tuple_latlon_regex(col: str, *, lon_first: bool = True) -> tuple[pl.Expr, pl.Expr]:
+    """
+    Strings wie "(9.39, 54.77)" oder "9.39,54.77" -> zwei Float64-Expressions (lat, lon).
+    Kein .split/.arr.* -> läuft auch auf älteren Polars-Versionen.
+    """
+    s = pl.col(col).cast(pl.Utf8)
+    # zwei Captures: 1=erster Wert, 2=zweiter Wert
+    first  = s.str.extract(r"\(?\s*([+-]?\d+(?:\.\d+)?)\s*,\s*([+-]?\d+(?:\.\d+)?)\s*\)?", group_index=1).cast(pl.Float64)
+    second = s.str.extract(r"\(?\s*([+-]?\d+(?:\.\d+)?)\s*,\s*([+-]?\d+(?:\.\d+)?)\s*\)?", group_index=2).cast(pl.Float64)
+    if lon_first:
+        lon, lat = first, second
+    else:
+        lat, lon = first, second
+    return lat, lon
