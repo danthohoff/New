@@ -1,0 +1,155 @@
+# Helper: UC → Kategorie (als Polars-Expr)
+def uc_category_expr(col: str = "uc") -> pl.Expr:
+    return (
+        pl.when(pl.col(col).is_in([31,32,28,21,22,23,24,25,26,27,29,30,18,12,13,14,47,48,49]))
+          .then(pl.lit("EIU"))
+        .when(pl.col(col).is_in([62,63,64,69,58,68,51,52,53,54,57,61,59,60]))
+          .then(pl.lit("EVU"))
+        .when(pl.col(col).is_in([91,92,93,94,95]))
+          .then(pl.lit("Sekundär"))
+        .when(pl.col(col).is_in([6,7,40,41,70,71,80,81,82,83,84,85,90,8,2,19,46,96]))
+          .then(pl.lit("Weitere"))
+        .otherwise(pl.lit("Unbekannt"))
+        .alias("UC_Kat")
+    )
+)
+
+
+# --- LU-Events (alle Ereignisse mit uc != null) ------------------------------
+df_lu = (
+    df_ev
+    .filter(pl.col("uc").is_not_null())
+    .select(["Betriebstag", "zn", "uc"])
+)
+
+# (optional) Kategorie-Label
+# df_lu = df_lu.with_columns(uc_category_expr("uc"))
+
+# Auswahl
+sel_lu = (
+    df_lu.join(selected_trains, on=["Betriebstag", "zn"], how="inner")
+         .group_by("Betriebstag")
+         .agg([
+             pl.len().alias("LU Auswahl"),
+             # Optional Breakdown:
+             # (pl.col("UC_Kat")=="EIU").sum().alias("EIU LU Auswahl"),
+             # (pl.col("UC_Kat")=="EVU").sum().alias("EVU LU Auswahl"),
+             # (pl.col("UC_Kat")=="Sekundär").sum().alias("Sek LU Auswahl"),
+             # (pl.col("UC_Kat")=="Weitere").sum().alias("Weitere LU Auswahl"),
+         ])
+)
+
+# Andere
+andere_lu = (
+    df_lu.join(selected_trains, on=["Betriebstag","zn"], how="anti")
+         .group_by("Betriebstag")
+         .agg([
+             pl.len().alias("LU andere"),
+             # Optional Breakdown analog:
+             # (pl.col("UC_Kat")=="EIU").sum().alias("EIU LU andere"),
+             # ...
+         ])
+)
+
+# … und unten beim Tages-Merge zusätzlich joinen:
+per_day = (
+    df_ev.select("Betriebstag").unique().sort("Betriebstag")
+         .join(zuege_auswahl_t, on="Betriebstag", how="left")
+         .join(zuege_andere_t, on="Betriebstag", how="left")
+         .join(sel_halte, on="Betriebstag", how="left")
+         .join(andere_halte, on="Betriebstag", how="left")
+         .join(sel_lu, on="Betriebstag", how="left")       # ⬅️ NEU
+         .join(andere_lu, on="Betriebstag", how="left")    # ⬅️ NEU
+         .with_columns([
+             pl.col("Züge Auswahl").fill_null(0),
+             pl.col("Züge andere").fill_null(0),
+             pl.col("Halte Auswahl").fill_null(0),
+             pl.col("pü Halte Auswahl").fill_null(0),
+             pl.col("Halte andere").fill_null(0),
+             pl.col("pü Halte andere").fill_null(0),
+             pl.col("LU Auswahl").fill_null(0),            # ⬅️ NEU
+             pl.col("LU andere").fill_null(0),             # ⬅️ NEU
+         ])
+         .with_columns((pl.col("Züge Auswahl") + pl.col("Züge andere")).alias("Züge alle"))
+         .with_columns((pl.col("Halte Auswahl") + pl.col("Halte andere")).alias("Halte alle"))
+         .with_columns((pl.col("pü Halte Auswahl") + pl.col("pü Halte andere")).alias("pü Halte alle"))
+         .with_columns((pl.col("LU Auswahl") + pl.col("LU andere")).alias("LU alle"))  # ⬅️ NEU
+         .with_columns(pl.col("Betriebstag").dt.week().alias("KW"))
+)
+
+
+# --- LU-Auswahl (Phasen) -----------------------------------------------------
+df_lu_ev = df_ev.filter(pl.col("uc").is_not_null()).select(["Betriebstag","zn","istzeit_dt","uc"])
+# (optional) df_lu_ev = df_lu_ev.with_columns(uc_category_expr("uc"))
+
+lu_sel = (
+    df_lu_ev
+    .join(ein_aus, on=["Betriebstag","zn"], how="inner")
+    .with_columns([
+        pl.when(pl.col("istzeit_dt") < pl.col("einfahrt")).then(pl.lit("vor"))
+         .when(pl.col("istzeit_dt") <= pl.col("ausfahrt")).then(pl.lit("auf"))
+         .otherwise(pl.lit("nach")).alias("phase"),
+    ])
+    .group_by(["Betriebstag","phase"])
+    .agg([
+        pl.len().alias("lu"),
+        # Optional Breakdown:
+        # (pl.col("UC_Kat")=="EIU").sum().alias("eiu_lu"),
+        # (pl.col("UC_Kat")=="EVU").sum().alias("evu_lu"),
+        # (pl.col("UC_Kat")=="Sekundär").sum().alias("sek_lu"),
+        # (pl.col("UC_Kat")=="Weitere").sum().alias("weit_lu"),
+    ])
+    .pivot(values=["lu"], index="Betriebstag", columns="phase")
+)
+
+# fehlende Phasen-Spalten ergänzen
+for ph in ("vor","auf","nach"):
+    col = f"lu_{ph}"
+    if col not in lu_sel.columns:
+        lu_sel = lu_sel.with_columns(pl.lit(0).alias(col))
+
+lu_sel = lu_sel.rename({
+    "lu_vor": "LU Auswahl vor",
+    "lu_auf": "LU Auswahl auf",
+    "lu_nach": "LU Auswahl nach",
+})
+
+# --- LU andere ---------------------------------------------------------------
+lu_andere = (
+    df_lu_ev
+    .join(selected_trains, on=["Betriebstag","zn"], how="anti")
+    .group_by("Betriebstag")
+    .agg(pl.len().alias("LU andere"))
+)
+
+# --- Merge in per_day --------------------------------------------------------
+per_day = (
+    df_ev.select("Betriebstag").unique().sort("Betriebstag")
+         .join(zuege_auswahl_t, on="Betriebstag", how="left")
+         .join(zuege_andere_t, on="Betriebstag", how="left")
+         .join(halte_sel, on="Betriebstag", how="left")
+         .join(df_halte_andere, on="Betriebstag", how="left")
+         .join(lu_sel, on="Betriebstag", how="left")       # ⬅️ NEU
+         .join(lu_andere, on="Betriebstag", how="left")    # ⬅️ NEU
+         .with_columns([
+             pl.col("Züge Auswahl").fill_null(0),
+             pl.col("Züge andere").fill_null(0),
+             pl.col("Halte andere").fill_null(0),
+             pl.col("pü Halte andere").fill_null(0),
+             pl.col("LU Auswahl vor").fill_null(0),        # ⬅️ NEU
+             pl.col("LU Auswahl auf").fill_null(0),        # ⬅️ NEU
+             pl.col("LU Auswahl nach").fill_null(0),       # ⬅️ NEU
+             pl.col("LU andere").fill_null(0),             # ⬅️ NEU
+         ])
+         .with_columns((pl.col("Züge Auswahl") + pl.col("Züge andere")).alias("Züge alle"))
+         .with_columns((
+             pl.col("Halte Auswahl vor") + pl.col("Halte Auswahl auf") + pl.col("Halte Auswahl nach") + pl.col("Halte andere")
+         ).alias("Halte alle"))
+         .with_columns((
+             pl.col("pü Halte Auswahl vor") + pl.col("pü Halte Auswahl auf") + pl.col("pü Halte Auswahl nach") + pl.col("pü Halte andere")
+         ).alias("pü Halte alle"))
+         .with_columns((
+             pl.col("LU Auswahl vor") + pl.col("LU Auswahl auf") + pl.col("LU Auswahl nach") + pl.col("LU andere")
+         ).alias("LU alle"))                                 # ⬅️ NEU
+         .with_columns(pl.col("Betriebstag").dt.week().alias("KW"))
+)
