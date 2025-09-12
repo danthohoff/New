@@ -1,0 +1,34 @@
+def build_transitions_with_net_ff(zlm: pl.DataFrame, seg_edges: pl.DataFrame) -> pl.DataFrame:
+    """
+    Liefert pro befahrenem Abschnitt (prev_bst -> bst) den Netztyp (HLN/Flaeche),
+    forward/backward gefüllt innerhalb jedes Zuglaufs.
+    """
+    # 1) prev_bst bestimmen
+    base = (
+        zlm.sort(["Betriebstag", "zn", "istzeit_dt"])
+           .with_columns(
+               pl.col("bst").shift(1).over(["Betriebstag", "zn"]).alias("prev_bst")
+           )
+           .filter(pl.col("prev_bst").is_not_null())
+           .select(["Betriebstag", "zn", "istzeit_dt", "prev_bst", "bst"])
+    )
+
+    # 2) Netz zuordnen
+    trans = (
+        base.join(seg_edges, left_on=["prev_bst", "bst"], right_on=["u", "v"], how="left")
+            .rename({"netz": "netz_raw"})
+            .select(["Betriebstag", "zn", "istzeit_dt", "prev_bst", "bst", "netz_raw"])
+    )
+
+    # 3) Forward-/Backward-Fill je Lauf (Window-Expr statt map_groups)
+    trans_filled = (
+        trans.sort(["Betriebstag", "zn", "istzeit_dt"])
+             .with_columns(
+                 pl.col("netz_raw")
+                   .fill_null(strategy="forward").over(["Betriebstag","zn"])
+                   .fill_null(strategy="backward").over(["Betriebstag","zn"])
+                   .fill_null("Flaeche")
+                   .alias("netz_final")
+             )
+    )
+    return trans_filled
