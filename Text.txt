@@ -1,0 +1,197 @@
+import polars as pl
+
+def per_train_halte_hln_flaeche(
+    df_ev: pl.DataFrame,
+    trans_inh: pl.DataFrame,
+    *,
+    ontime_sec: int = 360,
+) -> pl.DataFrame:
+    ev_sorted = (
+        df_ev.sort(["Betriebstag","zn","istzeit_dt"])
+             .with_columns([
+                 pl.col("bst").shift(1).over(["Betriebstag","zn"]).alias("prev_bst"),
+                 pl.col("bst").shift(-1).over(["Betriebstag","zn"]).alias("next_bst"),
+             ])
+    )
+
+    halts = (
+        ev_sorted.filter(pl.col("fsStatus").is_in([1,3]))
+                 .select(["Betriebstag","zn","istzeit_dt","vsp","bst","prev_bst","next_bst"])
+    )
+
+    # normal prev->bst
+    h1 = (
+        halts.rename({"prev_bst":"u","bst":"v"})
+             .join(trans_inh.select(["Betriebstag","zn","u","v","netz_inh"]),
+                   on=["Betriebstag","zn","u","v"], how="left")
+             .rename({"netz_inh":"netz1"})
+    )
+    # Startfall bst->next_bst
+    h2 = (
+        halts.rename({"bst":"u","next_bst":"v"})
+             .join(trans_inh.select(["Betriebstag","zn","u","v","netz_inh"]),
+                   on=["Betriebstag","zn","u","v"], how="left")
+             .rename({"netz_inh":"netz2"})
+             .select(["Betriebstag","zn","istzeit_dt","netz2"])
+    )
+
+    halts_lab = (
+        h1.join(h2, on=["Betriebstag","zn","istzeit_dt"], how="left")
+          .with_columns(
+              pl.when(pl.col("netz1").is_not_null()).then(pl.col("netz1"))
+               .when(pl.col("netz2").is_not_null()).then(pl.col("netz2"))
+               .otherwise(pl.lit("Flaeche"))
+               .alias("netz_final")
+          )
+          .with_columns((pl.col("vsp") < ontime_sec).alias("puenktlich"))
+          .select(["Betriebstag","zn","netz_final","puenktlich"])
+    )
+
+    per_train = (
+        halts_lab.group_by(["Betriebstag","zn","netz_final"])
+                 .agg([
+                     pl.len().alias("Halte"),
+                     pl.col("puenktlich").sum().cast(pl.Int64).alias("pü Halte"),
+                 ])
+                 .pivot(values=["Halte","pü Halte"], index=["Betriebstag","zn"], columns="netz_final")
+    )
+
+    # Spalten sicherstellen & umbenennen
+    for base in ["Halte","pü Halte"]:
+        for net in ["HLN","Flaeche"]:
+            col = f"{base}_{net}"
+            if col not in per_train.columns:
+                per_train = per_train.with_columns(pl.lit(0).alias(col))
+
+    per_train = per_train.rename({
+        "Halte_HLN":"Halte HLN", "Halte_Flaeche":"Halte Fläche",
+        "pü Halte_HLN":"pü Halte HLN", "pü Halte_Flaeche":"pü Halte Fläche",
+    })
+
+    # Totals + Quoten optional
+    per_train = per_train.with_columns([
+        (pl.col("Halte HLN") + pl.col("Halte Fläche")).alias("Halte alle"),
+        (pl.col("pü Halte HLN") + pl.col("pü Halte Fläche")).alias("pü Halte alle"),
+        pl.when(pl.col("Halte HLN") > 0).then(pl.col("pü Halte HLN")/pl.col("Halte HLN")).otherwise(None).alias("PÜ HLN"),
+        pl.when(pl.col("Halte Fläche") > 0).then(pl.col("pü Halte Fläche")/pl.col("Halte Fläche")).otherwise(None).alias("PÜ Fläche"),
+        pl.when(pl.col("Halte alle") > 0).then(pl.col("pü Halte alle")/pl.col("Halte alle")).otherwise(None).alias("PÜ alle"),
+    ])
+
+    return per_train.sort(["Betriebstag","zn"])
+
+
+def per_train_lu_hln_flaeche_with_uc(
+    df_ev: pl.DataFrame,
+    trans_inh: pl.DataFrame,
+    *,
+    dedup_key: tuple[str,...] = ("Betriebstag","zn","istzeit_dt","uc"),
+) -> pl.DataFrame:
+    # prev/next für node-basierte Zuordnung
+    ev_sorted = (
+        df_ev.sort(["Betriebstag","zn","istzeit_dt"])
+             .with_columns([
+                 pl.col("bst").shift(1).over(["Betriebstag","zn"]).alias("prev_bst"),
+                 pl.col("bst").shift(-1).over(["Betriebstag","zn"]).alias("next_bst"),
+             ])
+    )
+
+    lu_rows = (
+        ev_sorted.filter(pl.col("uc").is_not_null())
+                 .select(["Betriebstag","zn","istzeit_dt","uc","bst","prev_bst","next_bst"])
+                 .unique(subset=list(dedup_key))
+    )
+    if lu_rows.is_empty():
+        # leeres Grundgerüst pro (Tag, Zug) kannst du aus Halte-Tabelle erben; hier minimal zurückgeben
+        return pl.DataFrame({"Betriebstag":[], "zn":[]})
+
+    # normal prev->bst
+    l1 = (
+        lu_rows.rename({"prev_bst":"u","bst":"v"})
+               .join(trans_inh.select(["Betriebstag","zn","u","v","netz_inh"]),
+                     on=["Betriebstag","zn","u","v"], how="left")
+               .rename({"netz_inh":"netz1"})
+    )
+    # Startfall bst->next
+    l2 = (
+        lu_rows.rename({"bst":"u","next_bst":"v"})
+               .join(trans_inh.select(["Betriebstag","zn","u","v","netz_inh"]),
+                     on=["Betriebstag","zn","u","v"], how="left")
+               .rename({"netz_inh":"netz2"})
+               .select(["Betriebstag","zn","istzeit_dt","uc","netz2"])
+    )
+
+    lu_lab = (
+        l1.join(l2, on=["Betriebstag","zn","istzeit_dt","uc"], how="left")
+          .with_columns(
+              pl.when(pl.col("netz1").is_not_null()).then(pl.col("netz1"))
+               .when(pl.col("netz2").is_not_null()).then(pl.col("netz2"))
+               .otherwise(pl.lit("Flaeche"))
+               .alias("netz_final"),
+          )
+          .with_columns(uc_category_expr("uc"))
+          .select(["Betriebstag","zn","UC_Kat","netz_final"])
+          .unique()   # pro Event reicht 1x
+    )
+
+    # Counts je Zug × Netz × Kategorie
+    lu_counts = (
+        lu_lab.with_columns(pl.concat_str([pl.col("UC_Kat"), pl.lit(" LU "), pl.col("netz_final")]).alias("label"))
+              .group_by(["Betriebstag","zn","label"]).agg(pl.len().alias("n"))
+              .pivot(values="n", index=["Betriebstag","zn"], columns="label")
+    )
+
+    # erwartete Spalten absichern
+    cats = ["EIU","EVU","Sekundär","Weitere"]; nets = ["HLN","Flaeche"]
+    expected = [f"{c} LU {n}" for c in cats for n in nets]
+    for col in expected:
+        if col not in lu_counts.columns:
+            lu_counts = lu_counts.with_columns(pl.lit(0).alias(col))
+
+    # Summen je Netz & total
+    lu_counts = lu_counts.with_columns([
+        sum([pl.col(f"{c} LU HLN") for c in cats]).alias("LU HLN"),
+        sum([pl.col(f"{c} LU Flaeche") for c in cats]).alias("LU Fläche"),
+    ]).with_columns((pl.col("LU HLN") + pl.col("LU Fläche")).alias("LU alle"))
+
+    return lu_counts.sort(["Betriebstag","zn"])
+
+
+def per_train_metrics(
+    df_ev: pl.DataFrame,
+    seg_edges: pl.DataFrame,
+    *,
+    ontime_sec: int = 360,
+) -> pl.DataFrame:
+    # Transitions mit geerbtem Netz
+    trans_inh = build_transitions_with_inherited_net(df_ev, seg_edges, default_first="Flaeche")
+
+    # Halte je Zug
+    pt_halte = per_train_halte_hln_flaeche(df_ev, trans_inh, ontime_sec=ontime_sec)
+
+    # LU je Zug (mit Kategorien)
+    pt_lu = per_train_lu_hln_flaeche_with_uc(df_ev, trans_inh)
+
+    # Join
+    per_train = (
+        pt_halte.join(pt_lu, on=["Betriebstag","zn"], how="left")
+                .with_columns([
+                    pl.col("LU HLN").fill_null(0),
+                    pl.col("LU Fläche").fill_null(0),
+                    pl.col("LU alle").fill_null(0),
+                ])
+                .sort(["Betriebstag","zn"])
+    )
+
+    return per_train
+
+
+# 0) df_ev einlesen (mit Spalten: Betriebstag, zn, bst, istzeit_dt, fsStatus, vsp, uc)
+# 1) Segmentierung laden
+seg_edges = load_network_segmentation("/pfad/segmentierung.csv")
+
+# 2) Pro-Zug-Auswertung
+per_train = per_train_metrics(df_ev, seg_edges, ontime_sec=360)
+
+# 3) Speichern / ansehen
+per_train.write_csv("/pfad/cache/per_train_metrics.csv")
+print(per_train.head())
