@@ -1,0 +1,77 @@
+import pandas as pd
+import geopandas as gpd
+from shapely.geometry import Point
+from shapely.validation import make_valid
+
+BST_CSV = "betriebsstellen_mit_bundesland.csv"  # enthält lat/lon
+NETZ_GEOJSON = "netzstruktur.geojson"           # dein Export (mit 25832-Koordinaten, aber fälschlich als 4326)
+TARGET_LEVEL = "Netzbezirk"                     # "Region" | "Netzbezirk" | "Netz"
+
+# --- 1) Betriebsstellen laden (WGS84) ---
+bst = pd.read_csv(BST_CSV).dropna(subset=["lat","lon"]).copy()
+pts = gpd.GeoDataFrame(
+    bst.copy(),
+    geometry=[Point(xy) for xy in zip(bst["lon"], bst["lat"])],
+    crs="EPSG:4326"
+)
+
+# --- 2) Netzstruktur laden und CRS reparieren ---
+netz = gpd.read_file(NETZ_GEOJSON)
+print("Gelesenes CRS (laut Datei):", netz.crs)
+
+# Heuristik: wenn die Bounds "meter-haft" sind, ist das tatsächlich 25832
+minx, miny, maxx, maxy = netz.total_bounds
+looks_like_projected = (maxx > 200 or maxy > 200)  # >> Grad erreichen nie solche Werte
+
+if looks_like_projected:
+    # Datei ist „unechtes GeoJSON“ (Projektionswerte in 25832, aber als 4326 deklariert).
+    # -> CRS hart überschreiben und dann korrekt transformieren.
+    netz.set_crs(epsg=25832, allow_override=True, inplace=True)
+    print("CRS auf EPSG:25832 ÜBERSCHRIEBEN (allow_override=True).")
+else:
+    # Falls es doch echtes 4326 wäre: nichts tun.
+    print("Bounds sehen nach 4326 aus – kein Override nötig.")
+
+# --- 3) Ebene filtern + Geometrien reparieren ---
+lvl_col  = next(c for c in netz.columns if c.lower() == "org_level_name")
+name_col = next(c for c in netz.columns if c.lower() == "org_name")
+
+netz = netz[netz[lvl_col].astype(str).str.casefold() == TARGET_LEVEL.casefold()].copy()
+if not netz.empty:
+    invalid = (~netz.is_valid).sum()
+    if invalid:
+        print(f"Repariere {invalid} ungültige Geometrien (make_valid)…")
+        netz["geometry"] = netz.geometry.apply(make_valid)
+
+# --- 4) Für den Intersects-Join nach WGS84 bringen ---
+netz_wgs = netz.to_crs(epsg=4326).rename(columns={name_col: "label"})[["label", netz.geometry.name]]
+
+print("Punkte-Extent (4326):", pts.total_bounds)
+print("Polygone-Extent (4326):", netz_wgs.total_bounds)
+
+# --- 5) Intersects-Join ---
+joined = gpd.sjoin(pts, netz_wgs, how="left", predicate="intersects").rename(columns={"label":"netzbezirk"})
+print("Trefferquote intersects:", f"{joined['netzbezirk'].notna().mean():.1%}")
+
+# --- 6) Fallback: nächste Fläche in 25832 (metrisch) ---
+missing = joined["netzbezirk"].isna()
+if missing.any():
+    print("Fallback (nearest in EPSG:25832) für", int(missing.sum()), "Punkte …")
+    pts_32  = pts.to_crs(epsg=25832)
+    poly_32 = netz_wgs.to_crs(epsg=25832)
+
+    nearest = gpd.sjoin_nearest(
+        pts_32.loc[missing, ["geometry"]],
+        poly_32[["label", poly_32.geometry.name]],
+        how="left",
+        distance_col="dist_m"
+    )
+    # zurückschreiben
+    for idx, row in nearest.iterrows():
+        joined.at[idx, "netzbezirk"] = row["label"]
+
+# --- 7) Speichern ---
+out = joined.drop(columns=["geometry"])[["betriebsstelle","lat","lon","netzbezirk"]]
+out.sort_values(["netzbezirk","betriebsstelle"], inplace=True, na_position="last")
+out.to_csv("betriebsstellen_mit_netzbezirk.csv", index=False, encoding="utf-8")
+print("Fertig → betriebsstellen_mit_netzbezirk.csv")
