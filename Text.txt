@@ -1,0 +1,91 @@
+# pip install folium pandas geopandas
+
+import json
+import pandas as pd
+import geopandas as gpd
+import folium
+from folium.plugins import MarkerCluster
+
+# -------------------------------------------------
+BS_CSV     = "betriebsstellen_mit_netzbezirk.csv"  # betriebsstelle, lat, lon, netzbezirk
+NETZ_PATH  = "netzstruktur.geojson"
+OUT_HTML   = "bst_netzbezirke_karte.html"
+TARGET_LVL = "Netzbezirk"                          # "Region" | "Netzbezirk" | "Netz"
+# -------------------------------------------------
+
+# 1) BST laden
+bs = pd.read_csv(BS_CSV).dropna(subset=["lat", "lon"]).copy()
+center = [bs["lat"].mean(), bs["lon"].mean()] if len(bs) else [51.163, 10.447]
+
+# 2) Netzstruktur laden & CRS fixen -> WGS84
+netz = gpd.read_file(NETZ_PATH)
+
+# Heuristik: Wenn Bounds sehr groß sind, sind es Meter (UTM) -> 25832 annehmen
+minx, miny, maxx, maxy = netz.total_bounds
+if (maxx > 200) or (maxy > 200):
+    netz.set_crs(epsg=25832, allow_override=True, inplace=True)
+netz = netz.to_crs(epsg=4326)
+
+# gewünschte Ebene filtern
+lvl_col = next((c for c in netz.columns if c.lower() == "org_level_name"), None)
+name_col = next((c for c in netz.columns if c.lower() == "org_name"), None)
+if lvl_col:
+    netz = netz[netz[lvl_col].astype(str).str.casefold() == TARGET_LVL.casefold()].copy()
+
+# Namensspalte vereinheitlichen
+name_key = "label"
+if name_col and name_col in netz.columns:
+    netz = netz.rename(columns={name_col: name_key})
+elif name_key not in netz.columns:
+    # Fallback: erste Nicht-Geom-Spalte als Label benutzen
+    name_key = [c for c in netz.columns if c != netz.geometry.name][0]
+
+# *** WICHTIG: nur Name + Geometrie behalten (Timestamps & Co. weg) ***
+netz_min = netz[[name_key, netz.geometry.name]].copy()
+
+# Für Folium in dict umwandeln (jetzt ohne Timestamps -> kein Serialization-Fehler)
+netz_geojson = json.loads(netz_min.to_json())
+
+# 3) Karte bauen
+m = folium.Map(location=center, zoom_start=6, tiles="cartodbpositron", control_scale=True)
+
+# 4) Netzbezirke-Layer
+def style_fn(_):
+    return {"fillOpacity": 0.05, "weight": 1.0, "color": "#555555"}
+
+def highlight_fn(_):
+    return {"weight": 2.0, "color": "#000000", "fillOpacity": 0.12}
+
+gj = folium.GeoJson(
+    netz_geojson,
+    name=f"{TARGET_LVL}e",
+    style_function=style_fn,
+    highlight_function=highlight_fn,
+)
+folium.GeoJsonTooltip(fields=[name_key], aliases=[f"{TARGET_LVL}:"], sticky=False).add_to(gj)
+gj.add_to(m)
+
+# 5) BST als MarkerCluster
+cluster = MarkerCluster(name="Betriebsstellen").add_to(m)
+for _, row in bs.iterrows():
+    nbz = row.get("netzbezirk") if pd.notna(row.get("netzbezirk")) else "unbekannt"
+    popup = folium.Popup(
+        html=f"<b>{row['betriebsstelle']}</b><br/>Netzbezirk: {nbz}<br/>({row['lat']:.6f}, {row['lon']:.6f})",
+        max_width=320,
+    )
+    folium.CircleMarker(
+        location=[row["lat"], row["lon"]],
+        radius=4,
+        weight=1,
+        color="#222222",
+        fill=True,
+        fill_opacity=0.9,
+        fill_color="#1f77b4",
+        tooltip=f"{row['betriebsstelle']} – {nbz}",
+        popup=popup,
+    ).add_to(cluster)
+
+folium.LayerControl(collapsed=False).add_to(m)
+m.fit_bounds(m.get_bounds())
+m.save(OUT_HTML)
+print(f"✔ Karte gespeichert: {OUT_HTML}")
