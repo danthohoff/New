@@ -1,0 +1,94 @@
+# pip install geopandas shapely pandas
+
+import pandas as pd
+import geopandas as gpd
+from shapely.geometry import Point
+from shapely.validation import make_valid
+
+# ----------------- Pfade -----------------
+BST_CSV = "betriebsstellen_mit_bundesland.csv"  # enthält lat/lon
+NETZ_GEOJSON = "netzstruktur.geojson"           # dein Export
+TARGET_LEVEL = "Netzbezirk"                     # "Region" | "Netzbezirk" | "Netz"
+# -----------------------------------------
+
+# 1) Betriebsstellen laden
+bst = pd.read_csv(BST_CSV).dropna(subset=["lat","lon"]).copy()
+pts = gpd.GeoDataFrame(
+    bst.copy(),
+    geometry=[Point(xy) for xy in zip(bst["lon"], bst["lat"])],
+    crs="EPSG:4326"
+)
+
+# 2) Netzstruktur laden (egal ob mit/ohne CRS) und Diagnose
+netz = gpd.read_file(NETZ_GEOJSON)
+print("Netzstruktur: CRS=", netz.crs)
+print("Spalten:", list(netz.columns)[:10])
+
+# org_level_name / org_name finden
+lvl_col = next((c for c in netz.columns if c.lower() == "org_level_name"), None)
+name_col = next((c for c in netz.columns if c.lower() == "org_name"), None)
+if not lvl_col or not name_col:
+    raise RuntimeError("Spalten 'org_level_name' und/oder 'org_name' nicht gefunden.")
+
+print("org_level_name unique:", sorted(map(str, netz[lvl_col].dropna().unique()))[:10])
+
+# 3) CRS festlegen (dein Export ist sehr wahrscheinlich EPSG:25832)
+if netz.crs is None:
+    netz.set_crs(epsg=25832, inplace=True)  # <- ggf. anpassen, falls anders
+    print("CRS war None, auf EPSG:25832 gesetzt.")
+elif netz.crs.to_epsg() != 4326:
+    # nur Info
+    print("CRS ist nicht 4326 (ok), aktuelles EPSG:", netz.crs.to_epsg())
+
+# 4) Nach Level filtern (robust, casefold)
+target = TARGET_LEVEL.casefold()
+netz = netz[netz[lvl_col].astype(str).str.casefold() == target].copy()
+print(f"Features nach Filter '{TARGET_LEVEL}':", len(netz))
+if netz.empty:
+    raise RuntimeError("Kein Feature nach Level-Filter – stimmt der Wert genau?")
+
+# 5) Geometrien reparieren (falls ungültig) und nach WGS84 transformieren
+invalid = (~netz.is_valid).sum()
+if invalid:
+    print(f"Repariere {invalid} ungültige Geometrien (make_valid)…")
+    netz["geometry"] = netz.geometry.apply(make_valid)
+
+netz_wgs = netz.to_crs(epsg=4326)
+netz_wgs = netz_wgs.rename(columns={name_col: "label"})[["label", netz_wgs.geometry.name]]
+
+# Diagnose Extents
+print("Punkte-Extent (4326):", pts.total_bounds, "  Polygone-Extent (4326):", netz_wgs.total_bounds)
+
+# 6) Primärer Join (intersects)
+joined = gpd.sjoin(
+    pts,
+    netz_wgs,
+    how="left",
+    predicate="intersects"
+).rename(columns={"label":"netzbezirk"})
+
+hit_rate = joined["netzbezirk"].notna().mean()
+print(f"Trefferquote intersects: {hit_rate:.1%}")
+
+# 7) Fallback: nächste Fläche, aber in metrischem CRS (25832)
+missing = joined["netzbezirk"].isna()
+if missing.any():
+    print("Fallback (nearest in EPSG:25832) für", missing.sum(), "Punkte…")
+    pts_32  = pts.to_crs(epsg=25832)
+    poly_32 = netz_wgs.to_crs(epsg=25832)
+
+    nearest = gpd.sjoin_nearest(
+        pts_32.loc[missing, ["geometry"]],
+        poly_32[["label", poly_32.geometry.name]],
+        how="left",
+        distance_col="dist_m"
+    )
+    # zurückschreiben
+    for idx, row in nearest.iterrows():
+        joined.at[idx, "netzbezirk"] = row["label"]
+
+# 8) Ergebnis speichern
+out = pd.DataFrame(joined.drop(columns=["geometry"]))[["betriebsstelle","lat","lon","netzbezirk"]]
+out.sort_values(["netzbezirk","betriebsstelle"], inplace=True, na_position="last")
+out.to_csv("betriebsstellen_mit_netzbezirk.csv", index=False, encoding="utf-8")
+print("Fertig → betriebsstellen_mit_netzbezirk.csv")
