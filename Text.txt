@@ -1,0 +1,28 @@
+def assign_bundesland(bs, laender):
+    name_col = pick_name_column(laender)
+
+    points = gpd.GeoDataFrame(
+        bs.copy(),
+        geometry=[Point(xy) for xy in zip(bs["lon"], bs["lat"])],
+        crs="EPSG:4326"
+    )
+
+    joined = gpd.sjoin(points, laender[[name_col, laender.geometry.name]],
+                       how="left", predicate="intersects")
+    joined = joined.rename(columns={name_col:"bundesland"})
+
+    # Fallback: nächstgelegenes Bundesland
+    missing = joined["bundesland"].isna()
+    if missing.any():
+        # In ein metrisches CRS transformieren (hier UTM 32N, gut für Deutschland)
+        pts_proj = points.to_crs(epsg=25832)
+        laender_proj = laender.to_crs(epsg=25832)
+
+        laender_small = laender_proj[[name_col, laender_proj.geometry.name]]
+
+        for i, row in pts_proj.loc[missing].iterrows():
+            d = laender_small.distance(row.geometry)  # jetzt in Metern
+            j = d.idxmin()
+            joined.at[i, "bundesland"] = laender_small.at[j, name_col]
+
+    return joined.drop(columns=["geometry"])[["betriebsstelle","lat","lon","bundesland"]]
