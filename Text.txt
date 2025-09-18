@@ -1,0 +1,33 @@
+import json
+import geopandas as gpd
+from shapely import wkt
+
+# Dump laden (deine Datei mit dem "SELECT … : [ … ]")
+with open("db_geo_org_dump.json", "r", encoding="utf-8") as f:
+    raw = json.load(f)
+
+# Der Schlüssel sieht bei dir so aus: "SELECT org_level, ... FROM sqf_geo.db_geo_org"
+features = raw[next(iter(raw))]   # nimmt einfach den ersten Key → die Liste von Dicts
+
+# Umbauen zu FeatureCollection
+geojson = {
+    "type": "FeatureCollection",
+    "features": []
+}
+
+for fdict in features:
+    geom_wkt = fdict.pop("geom")
+    feature = {
+        "type": "Feature",
+        "geometry": wkt.loads(geom_wkt).__geo_interface__,
+        "properties": fdict
+    }
+    geojson["features"].append(feature)
+
+# Speichern als echtes GeoJSON
+with open("netzstruktur.geojson", "w", encoding="utf-8") as f:
+    json.dump(geojson, f)
+
+# Jetzt kann GeoPandas es normal lesen
+gdf = gpd.read_file("netzstruktur.geojson")
+print(gdf.head())
