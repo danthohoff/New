@@ -1,0 +1,115 @@
+# bst_clip_simple.py
+# pip install pandas geopandas shapely requests rtree pyproj
+
+import os, io, re, requests, pandas as pd, geopandas as gpd
+from shapely.geometry import Point
+
+BUNDESLAENDER_URL = "https://raw.githubusercontent.com/isellsoap/deutschlandGeoJSON/master/2_bundeslaender/3_mittel.geojson"
+
+LAT_RANGE = (45.0, 58.0)
+LON_RANGE = (3.0, 20.0)
+_num_re = re.compile(r"[-+]?\d+(?:[.,]\d+)?")
+
+def _is_lat(x): return LAT_RANGE[0] <= x <= LAT_RANGE[1]
+def _is_lon(x): return LON_RANGE[0] <= x <= LON_RANGE[1]
+
+def parse_latlon(val):
+    if pd.isna(val): return None
+    if isinstance(val, (tuple, list)) and len(val) == 2:
+        try:
+            a = float(str(val[0]).replace(",", "."))
+            b = float(str(val[1]).replace(",", "."))
+        except ValueError:
+            return None
+    else:
+        s = str(val).strip().strip('"').strip("'")
+        nums = _num_re.findall(s)
+        if len(nums) < 2: return None
+        a = float(nums[0].replace(",", "."))
+        b = float(nums[1].replace(",", "."))
+    if _is_lat(a) and _is_lon(b): return (a, b)
+    if _is_lon(a) and _is_lat(b): return (b, a)
+    return None
+
+def build_betriebsstellen(df):
+    a = df[["von","von_latlon"]].rename(columns={"von":"betriebsstelle","von_latlon":"latlon"})
+    b = df[["bis","bis_latlon"]].rename(columns={"bis":"betriebsstelle","bis_latlon":"latlon"})
+    long_df = pd.concat([a,b], ignore_index=True)
+    coords = long_df["latlon"].apply(parse_latlon)
+    long_df["lat"] = coords.apply(lambda t: t[0] if t else None)
+    long_df["lon"] = coords.apply(lambda t: t[1] if t else None)
+    long_df["betriebsstelle"] = long_df["betriebsstelle"].astype(str).str.strip()
+    long_df = long_df.dropna(subset=["lat","lon"])
+    def pick_coords(grp):
+        vc = grp[["lat","lon"]].round(6).value_counts()
+        if not vc.empty:
+            lat, lon = vc.index[0]; return pd.Series({"lat":lat,"lon":lon})
+        return pd.Series({"lat":grp["lat"].mean(),"lon":grp["lon"].mean()})
+    return long_df.groupby("betriebsstelle", as_index=False).apply(pick_coords).reset_index(drop=True)
+
+def load_bundeslaender():
+    try:
+        gdf = gpd.read_file(BUNDESLAENDER_URL)
+    except Exception:
+        r = requests.get(BUNDESLAENDER_URL, timeout=30); r.raise_for_status()
+        gdf = gpd.read_file(io.BytesIO(r.content))
+    if gdf.crs is None: gdf.set_crs(epsg=4326, inplace=True)
+    else: gdf = gdf.to_crs(epsg=4326)
+    for c in ["GEN","NAME","name","NAME_1","Bundesland"]:
+        if c in gdf.columns: gdf = gdf.rename(columns={c:"label"}); break
+    return gdf[["label", gdf.geometry.name]]
+
+def load_netzstruktur(path, level):
+    gdf = gpd.read_file(path)
+    if gdf.crs is None: gdf.set_crs(epsg=4326, inplace=True)
+    else: gdf = gdf.to_crs(epsg=4326)
+    lvl_col = next(c for c in gdf.columns if c.lower()=="org_level_name")
+    name_col = next(c for c in gdf.columns if c.lower()=="org_name")
+    gdf = gdf[gdf[lvl_col].str.casefold() == level.casefold()]
+    gdf = gdf.rename(columns={name_col:"label"})
+    return gdf[["label", gdf.geometry.name]]
+
+def clip_bst_to_layer(bst, poly):
+    points = gpd.GeoDataFrame(
+        bst.copy(),
+        geometry=[Point(xy) for xy in zip(bst["lon"], bst["lat"])],
+        crs="EPSG:4326"
+    )
+    joined = gpd.sjoin(points, poly[["label", poly.geometry.name]],
+                       how="left", predicate="intersects").rename(columns={"label":"gebiet"})
+    missing = joined["gebiet"].isna()
+    if missing.any():
+        pts_proj = points.to_crs(epsg=25832)
+        poly_proj = poly.to_crs(epsg=25832)
+        poly_small = poly_proj[["label", poly_proj.geometry.name]]
+        for i, row in pts_proj.loc[missing].iterrows():
+            d = poly_small.distance(row.geometry)
+            j = d.idxmin()
+            joined.at[i, "gebiet"] = poly_small.at[j,"label"]
+    return pd.DataFrame(joined.drop(columns=["geometry"]))[["betriebsstelle","lat","lon","gebiet"]]
+
+# ----------------------------------------------------------
+if __name__ == "__main__":
+    # >>> HIER EINSTELLEN <<<
+    INPUT_CSV = "trassenfinder_verbindungen.csv"   # deine Strecken-Datei
+    NETZ_GEOJSON = "netzstruktur.geojson"          # Export aus DB mit org_level_name/org_name
+    LAYER = "bundesland"                           # "bundesland" | "region" | "netzbezirk" | "netz"
+    OUTPUT = f"bst_mit_{LAYER}.csv"
+    # -------------------------------------------------------
+
+    df = pd.read_csv(INPUT_CSV)
+    bst = build_betriebsstellen(df)
+
+    if LAYER == "bundesland":
+        poly = load_bundeslaender()
+    elif LAYER in ["region","netzbezirk","netz"]:
+        poly = load_netzstruktur(NETZ_GEOJSON, LAYER.capitalize())
+    else:
+        raise ValueError(f"Unbekannter Layer: {LAYER}")
+
+    res = clip_bst_to_layer(bst, poly)
+    res = res.rename(columns={"gebiet":LAYER})
+    res.sort_values([LAYER,"betriebsstelle"], inplace=True, na_position="last")
+    res.to_csv(OUTPUT, index=False, encoding="utf-8")
+
+    print(f"Fertig: {len(res)} Betriebsstellen mit {LAYER} zugeordnet → {OUTPUT}")
