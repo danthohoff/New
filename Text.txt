@@ -1,0 +1,162 @@
+import folium
+import pandas as pd
+import numpy as np
+from folium.plugins import HeatMap, MarkerCluster
+
+def plot_interactions_folium_advanced(
+    per_bst_csv: str,
+    bst_coords_csv: str,
+    *,
+    value_col: str = "inter_all",           # welche Metrik einfärben
+    mode: str = "gradient",                 # "gradient" | "quantiles" | "heatmap"
+    filters: dict | None = None,            # z.B. {"min_value": 5}
+    top_n: int | None = None,               # top-n hervorheben
+    layers: dict | None = None,             # zusätzliche Layer: {"NRW<->NRW": "inter_NRWs", ...}
+    use_cluster: bool = False,              # MarkerCluster einschalten
+    map_center: tuple = (51.3, 7.5),
+    zoom_start: int = 7,
+    output_html: str = "bst_interactions_map.html",
+    base_tiles: str = "cartodb positron",
+):
+    """
+    Visualisiert Interaktionen je Betriebsstelle übersichtlich:
+      - mode="gradient": konstante Punktgröße, Farbe ~ Wert (linear)
+      - mode="quantiles": diskrete Klassenfarben (z.B. 5-Quantile)
+      - mode="heatmap": Heatmap-Overlay (keine Punkte)
+    Zusätzlich:
+      - filters={"min_value": x} blendet Kleinstwerte aus
+      - top_n: Beschriftet die Top-N nach value_col
+      - layers: dict Label->Spaltenname fügt umschaltbare Layer hinzu
+      - use_cluster: sammelt Punkte in MarkerCluster
+    """
+    # 1) Daten
+    df = pd.read_csv(per_bst_csv)
+    coords = pd.read_csv(bst_coords_csv).rename(columns={"betriebsstelle":"bst"})
+    df = df.merge(coords[["bst","lat","lon"]], on="bst", how="left").dropna(subset=["lat","lon"])
+
+    if value_col not in df.columns:
+        raise ValueError(f"Spalte '{value_col}' nicht in {per_bst_csv} gefunden.")
+
+    # 2) Filter
+    if filters and "min_value" in filters:
+        df = df[df[value_col] >= filters["min_value"]].copy()
+
+    # 3) Karte
+    m = folium.Map(location=map_center, zoom_start=zoom_start, tiles=base_tiles)
+
+    # 4) Hilfen für Farben/Klassen
+    vals = df[value_col].fillna(0).astype(float)
+    vmin, vmax = float(vals.min()), float(vals.max() if vals.max() > 0 else 1.0)
+
+    def make_linear_colormap():
+        return folium.LinearColormap(
+            colors=["#ffffcc","#ffeda0","#feb24c","#f03b20","#bd0026"],
+            vmin=vmin, vmax=vmax, caption=value_col
+        )
+
+    def value_to_color_linear(x, cmap):
+        return cmap(x if np.isfinite(x) else 0.0)
+
+    def quantile_bins(x, q=5):
+        # diskrete Klassen
+        qs = np.quantile(x, np.linspace(0,1,q+1))
+        # kleine numerische Störungen glätten
+        qs = np.unique(np.round(qs, 10))
+        return qs
+
+    # 5) Layer-Logik
+    layer_specs = [(f"Alle ({value_col})", value_col)]
+    if layers:
+        for name, col in layers.items():
+            if col in df.columns:
+                layer_specs.append((name, col))
+
+    # 6) Plot je Layer
+    for layer_name, col in layer_specs:
+        sub = df.dropna(subset=["lat","lon"]).copy()
+        if col not in sub.columns:
+            continue
+
+        fg = folium.FeatureGroup(name=layer_name, show=True).add_to(m)
+
+        if mode == "heatmap":
+            # Heatmap: Gewicht = Spaltenwert (normalisiert)
+            w = sub[col].astype(float).values
+            if w.max() <= 0:
+                continue
+            w_norm = (w / w.max()).tolist()
+            heat_data = list(zip(sub["lat"].tolist(), sub["lon"].tolist(), w_norm))
+            HeatMap(heat_data, radius=18, blur=22, max_zoom=12).add_to(fg)
+
+        elif mode == "quantiles":
+            qs = quantile_bins(sub[col].astype(float).values, q=5)
+            palette = ["#ffffcc","#ffeda0","#feb24c","#f03b20","#bd0026"]
+            def color_for_val(v):
+                # finde Klasse
+                idx = np.searchsorted(qs, v, side="right") - 1
+                idx = max(0, min(len(palette)-1, idx))
+                return palette[idx]
+
+            if use_cluster:
+                cluster = MarkerCluster(name=f"{layer_name} (cluster)").add_to(fg)
+                target = cluster
+            else:
+                target = fg
+
+            for _, r in sub.iterrows():
+                v = float(r[col]) if pd.notnull(r[col]) else 0.0
+                c = color_for_val(v)
+                tt = folium.Tooltip(f"{r['bst']}: {col}={v:.0f}")
+                folium.CircleMarker(
+                    location=(r["lat"], r["lon"]),
+                    radius=5,                    # KONSTANTE Größe
+                    color=c, fill=True, fill_opacity=0.85, weight=0.5,
+                    tooltip=tt
+                ).add_to(target)
+
+            # Legende als diskrete Farbchips
+            legend = folium.map.LayerControl()
+            # simple diskrete Legende bauen via MacroElement ist aufwändiger; hier reicht ein Hinweis:
+            folium.map.Marker(
+                location=(map_center[0], map_center[1]),
+                icon=folium.DivIcon(html=f"<div style='background:white;padding:6px;border:1px solid #999'>Klassen: {qs}</div>")
+            ).add_to(fg)
+
+        else:  # "gradient"
+            cmap = make_linear_colormap()
+            if use_cluster:
+                cluster = MarkerCluster(name=f"{layer_name} (cluster)").add_to(fg)
+                target = cluster
+            else:
+                target = fg
+
+            for _, r in sub.iterrows():
+                v = float(r[col]) if pd.notnull(r[col]) else 0.0
+                c = value_to_color_linear(v, cmap)
+                tt = folium.Tooltip(f"{r['bst']}: {col}={v:.0f}")
+                folium.CircleMarker(
+                    location=(r["lat"], r["lon"]),
+                    radius=5,                    # KONSTANTE Größe
+                    color=c, fill=True, fill_opacity=0.85, weight=0.5,
+                    tooltip=tt
+                ).add_to(target)
+            # nur einmal die Legende hinzufügen
+            if layer_name == layer_specs[0][0]:
+                cmap.add_to(m)
+
+        # Top-N Labels (optional, nur einmal sinnvoll)
+        if top_n and layer_name == layer_specs[0][0]:
+            top = sub.sort_values(col, ascending=False).head(top_n)
+            for _, r in top.iterrows():
+                folium.map.Marker(
+                    location=(r["lat"], r["lon"]),
+                    icon=folium.DivIcon(
+                        html=f"<div style='font-size:11px;color:#333;background:rgba(255,255,255,0.8);"
+                             f"padding:2px 4px;border-radius:3px;border:1px solid #999'>{r['bst']} ({int(r[col])})</div>"
+                    )
+                ).add_to(m)
+
+    folium.LayerControl(collapsed=False).add_to(m)
+    m.save(output_html)
+    print(f"✅ Karte gespeichert unter: {output_html}")
+    return m
