@@ -1,0 +1,97 @@
+import folium
+import pandas as pd
+import numpy as np
+
+def plot_interactions_folium(per_bst_csv: str, bst_coords_csv: str,
+                             value_col: str = "inter_all",
+                             map_center: tuple = (51.0, 9.0),
+                             zoom_start: int = 7,
+                             output_html: str = "bst_interactions_map.html"):
+    """
+    Stellt die Interaktionen pro Betriebsstelle grafisch mit Folium dar.
+    
+    Parameter:
+    -----------
+    per_bst_csv : str
+        Pfad zur CSV mit den per_bst-Ergebnissen (enthält Spalte 'bst' und 'value_col').
+    bst_coords_csv : str
+        Pfad zur CSV mit Spalten ['betriebsstelle', 'lat', 'lon'].
+    value_col : str
+        Spalte in per_bst_csv, deren Werte visualisiert werden sollen.
+    map_center : tuple
+        (lat, lon) Startpunkt der Karte.
+    zoom_start : int
+        Anfangs-Zoomlevel für Folium.
+    output_html : str
+        Pfad zur gespeicherten interaktiven HTML-Karte.
+    """
+
+    # -------------------
+    # 1️⃣ Daten laden
+    # -------------------
+    df_inter = pd.read_csv(per_bst_csv)
+    df_bst = pd.read_csv(bst_coords_csv)
+
+    # Vereinheitliche Spaltennamen
+    df_bst.rename(columns={'betriebsstelle': 'bst'}, inplace=True)
+
+    # Zusammenführen
+    df = pd.merge(df_inter, df_bst, on='bst', how='left')
+
+    # Fehlende Koordinaten aussortieren
+    df = df.dropna(subset=["lat", "lon"])
+
+    # -------------------
+    # 2️⃣ Werte für Darstellung vorbereiten
+    # -------------------
+    if value_col not in df.columns:
+        raise ValueError(f"Spalte '{value_col}' nicht in {per_bst_csv} gefunden.")
+
+    values = df[value_col].fillna(0)
+    vmin, vmax = values.min(), values.max()
+
+    # logarithmische Skalierung für Markergröße (damit Extreme nicht alles dominieren)
+    df["marker_size"] = np.clip((np.log1p(values) / np.log1p(vmax)) * 25, 3, 25)
+
+    # Farbskala von hellgelb (wenig) bis dunkelrot (viel)
+    colormap = folium.LinearColormap(
+        colors=["#ffffcc", "#ffeda0", "#feb24c", "#f03b20", "#bd0026"],
+        vmin=vmin,
+        vmax=vmax,
+        caption=value_col,
+    )
+
+    # -------------------
+    # 3️⃣ Karte aufbauen
+    # -------------------
+    m = folium.Map(location=map_center, zoom_start=zoom_start, tiles="cartodb positron")
+
+    for _, row in df.iterrows():
+        value = row[value_col]
+        color = colormap(value)
+
+        popup_html = f"""
+        <b>Betriebsstelle:</b> {row['bst']}<br>
+        <b>{value_col}:</b> {value:.0f}<br>
+        <b>Lat:</b> {row['lat']:.5f}<br>
+        <b>Lon:</b> {row['lon']:.5f}
+        """
+
+        folium.CircleMarker(
+            location=(row['lat'], row['lon']),
+            radius=row["marker_size"],
+            color=color,
+            fill=True,
+            fill_opacity=0.8,
+            popup=folium.Popup(popup_html, max_width=250)
+        ).add_to(m)
+
+    # Legende hinzufügen
+    colormap.add_to(m)
+
+    # -------------------
+    # 4️⃣ Karte speichern & zurückgeben
+    # -------------------
+    m.save(output_html)
+    print(f"✅ Karte gespeichert unter: {output_html}")
+    return m
