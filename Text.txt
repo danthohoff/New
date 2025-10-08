@@ -1,0 +1,91 @@
+    elif mode == "unique_per_day":
+        ev_binned = ev.select(["Betriebstag","zn","bst","t_bucket","istzeit_dt"]).unique()
+
+        # ⏱ Repräsentative Zeit pro Bucket nehmen (Mittelwert oder Minimum)
+        ev_time = (
+            ev_binned.group_by(["Betriebstag","zn","bst","t_bucket"])
+                     .agg(pl.col("istzeit_dt").min().alias("approx_time"))
+        )
+
+        # Alle Paare innerhalb desselben Buckets
+        pairs_bucket = (
+            ev_time.join(ev_time, on=["Betriebstag","bst","t_bucket"], how="inner", suffix="_r")
+                    .filter(pl.col("zn") < pl.col("zn_r"))
+                    .select(["Betriebstag","bst","zn","zn_r","approx_time","approx_time_r"])
+        )
+
+        # Einmal pro Tag/Station deduplizieren
+        pairs_unique = pairs_bucket.unique(subset=["Betriebstag","bst","zn","zn_r"])
+
+        # NRW-Verhalten pro Zug
+        nrw_timing = (
+            ev.filter(pl.col("in_nrw"))
+              .group_by(["Betriebstag","zn"])
+              .agg([
+                  pl.col("istzeit_dt").min().alias("first_nrw_time"),
+                  pl.col("istzeit_dt").max().alias("last_nrw_time")
+              ])
+        )
+
+        nrw_trains = (
+            ev.group_by(["Betriebstag","zn"])
+              .agg(pl.col("in_nrw").any().alias("is_nrw"))
+              .join(nrw_timing, on=["Betriebstag","zn"], how="left")
+        )
+
+        # Paare labeln
+        pairs_labeled = (
+            pairs_unique
+            .join(nrw_trains, on=["Betriebstag","zn"], how="left")
+            .rename({
+                "is_nrw":"is_nrw_left",
+                "first_nrw_time":"first_nrw_left",
+                "last_nrw_time":"last_nrw_left"
+            })
+            .join(nrw_trains, left_on=["Betriebstag","zn_r"], right_on=["Betriebstag","zn"], how="left")
+            .rename({
+                "is_nrw":"is_nrw_right",
+                "first_nrw_time":"first_nrw_right",
+                "last_nrw_time":"last_nrw_right"
+            })
+        )
+
+        # Kategorisierung
+        pairs_labeled = pairs_labeled.with_columns([
+            (pl.col("is_nrw_left") & pl.col("is_nrw_right")).alias("pair_nrw_nrw"),
+            (~pl.col("is_nrw_left") & ~pl.col("is_nrw_right")).alias("pair_non_non"),
+            (pl.col("is_nrw_left") ^ pl.col("is_nrw_right")).alias("pair_mixed"),
+            # neue Unterscheidung:
+            (
+                (pl.col("is_nrw_left") & pl.col("is_nrw_right").not_() & 
+                 (pl.col("approx_time") > pl.col("first_nrw_left")))
+                | 
+                (pl.col("is_nrw_right") & pl.col("is_nrw_left").not_() & 
+                 (pl.col("approx_time_r") > pl.col("first_nrw_right")))
+            ).alias("pair_mixed_fromNRW"),
+            (
+                (pl.col("is_nrw_left") & pl.col("is_nrw_right").not_() & 
+                 (pl.col("approx_time") < pl.col("first_nrw_left")))
+                | 
+                (pl.col("is_nrw_right") & pl.col("is_nrw_left").not_() & 
+                 (pl.col("approx_time_r") < pl.col("first_nrw_right")))
+            ).alias("pair_mixed_enterLater"),
+        ])
+
+        # Aggregation
+        group_keys = ["bst"] if not group_by_day else ["Betriebstag","bst"]
+
+        per_bst = (
+            pairs_labeled.group_by(group_keys)
+              .agg([
+                  pl.sum("pair_nrw_nrw").alias("inter_NRWs"),
+                  pl.sum("pair_non_non").alias("inter_NichtNRWs"),
+                  pl.sum("pair_mixed").alias("inter_gemischt"),
+                  pl.sum("pair_mixed_fromNRW").alias("inter_gemischt_fromNRW"),
+                  pl.sum("pair_mixed_enterLater").alias("inter_gemischt_enterLater"),
+              ])
+              .sort(group_keys)
+        )
+
+        debug_df = pairs_labeled
+        return per_bst, debug_df
