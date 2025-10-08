@@ -1,0 +1,201 @@
+import polars as pl
+
+def interactions_nrw(
+    df_zlm: pl.DataFrame,
+    nrw_bsts: list[str],
+    *,
+    window_minutes: int = 10,
+    mode: str = "bucket_combinatorics",   # "bucket_combinatorics" | "unique_per_day"
+    split_nrw_state: bool = True,         # nur relevant für bucket_combinatorics
+    group_by_day: bool = False,           # True → je Betriebstag ausgeben
+) -> tuple[pl.DataFrame, pl.DataFrame]:
+    """
+    Einheitliche Interaktionszählung NRW vs. Nicht-NRW an Betriebsstellen.
+
+    Eingaben
+    --------
+    df_zlm : Polars DataFrame mit mind. Spalten:
+             ["Betriebstag", "zn", "bst", "istzeit_dt"] (istzeit_dt = Datetime)
+    nrw_bsts : Liste von Betriebsstellen, die zu NRW gehören.
+
+    Parameter
+    ---------
+    window_minutes : Länge des disjunkten Zeit-Buckets (beide Modi).
+    mode : "bucket_combinatorics" (Zeit-Rate) oder "unique_per_day" (jede Paarung 1x/Tag/Station).
+    split_nrw_state : (nur bucket_combinatorics) – gemischte Kontakte weiter trennen:
+                      "fromNRW" (kam vorher aus NRW) vs. "enterLater" (fährt später erst in NRW).
+    group_by_day : Ergebnisse je Tag ausgeben (statt über den ganzen Zeitraum aufsummiert).
+
+    Rückgabe
+    --------
+    per_bst : DataFrame der Interaktionen je bst (ggf. je Tag & bst, wenn group_by_day=True).
+              Spalten: "inter_NRWs", "inter_NichtNRWs", "inter_gemischt"
+              (im Kombinatorik-Modus evtl. zusätzlich "inter_gemischt_fromNRW", "inter_gemischt_enterLater")
+    debug_df : Hilfs-DataFrame (z. B. Bucket-Zählungen bzw. unique Paare) zur Verifikation.
+
+    Hinweise
+    --------
+    - "bucket_combinatorics": disjunkte Buckets → ein Paar kann in mehreren Buckets zählen (zeitgewichtet).
+    - "unique_per_day": jedes (zn, zn_r)-Paar je Tag & Station max. 1×, egal wie lange die gemeinsame Anwesenheit war.
+    """
+
+    # 0) Basis vorbereiten
+    ev = (
+        df_zlm
+        .select(["Betriebstag", "zn", "bst", "istzeit_dt"])
+        .with_columns(pl.col("bst").is_in(nrw_bsts).alias("in_nrw"))
+        .sort(["Betriebstag", "zn", "istzeit_dt"])
+    )
+
+    # NRW-Train-Flag (Zug hat irgendwann eine NRW-BST am Tag)
+    ev = ev.with_columns([
+        pl.col("in_nrw").any().over(["Betriebstag","zn"]).alias("is_nrw_train"),
+        pl.when(pl.col("in_nrw").any().over(["Betriebstag","zn"]))
+          .then(pl.lit("NRW"))
+          .otherwise(pl.lit("Nicht-NRW"))
+          .alias("train_type"),
+        pl.col("istzeit_dt").dt.truncate(f"{window_minutes}m").alias("t_bucket"),
+    ])
+
+    if mode == "bucket_combinatorics":
+        # 1) optionaler NRW-Status relativ zum Event (nur für Split)
+        if split_nrw_state:
+            ev = ev.with_columns([
+                pl.col("in_nrw").cum_max().over(["Betriebstag","zn"]).shift(1).fill_null(False).alias("past_in_nrw"),
+                pl.col("in_nrw").reverse().cum_max().reverse().over(["Betriebstag","zn"]).shift(-1).fill_null(False).alias("future_in_nrw"),
+            ])
+
+        # 2) Zählungen pro (Tag, bst, Bucket)
+        base_counts = (
+            ev.group_by(["Betriebstag","bst","t_bucket"])
+              .agg([
+                  pl.col("train_type").eq("NRW").sum().cast(pl.Int64).alias("n_nrw"),
+                  pl.col("train_type").ne("NRW").sum().cast(pl.Int64).alias("n_non"),
+              ])
+        )
+
+        if split_nrw_state:
+            extra = (
+                ev.filter(pl.col("train_type")=="NRW")
+                  .group_by(["Betriebstag","bst","t_bucket"])
+                  .agg([
+                      pl.col("past_in_nrw").sum().cast(pl.Int64).alias("n_from"),
+                      ((~pl.col("past_in_nrw")) & pl.col("future_in_nrw")).sum().cast(pl.Int64).alias("n_enter"),
+                  ])
+            )
+            counts = (base_counts.join(extra, on=["Betriebstag","bst","t_bucket"], how="left")
+                                .with_columns([pl.col("n_from").fill_null(0), pl.col("n_enter").fill_null(0)]))
+        else:
+            counts = base_counts.with_columns([pl.lit(0).alias("n_from"), pl.lit(0).alias("n_enter")])
+
+        # 3) Interaktionen pro Bucket (Kombinatorik, ohne Paarmaterialisierung)
+        counts = counts.with_columns([
+            (pl.col("n_nrw") * (pl.col("n_nrw") - 1) // 2).alias("c_NRWs"),
+            (pl.col("n_non") * (pl.col("n_non") - 1) // 2).alias("c_NichtNRWs"),
+            (pl.col("n_nrw") * pl.col("n_non")).alias("c_gemischt"),
+            (pl.col("n_from") * pl.col("n_non")).alias("c_gemischt_fromNRW"),
+            (pl.col("n_enter") * pl.col("n_non")).alias("c_gemischt_enterLater"),
+        ])
+
+        # 4) Aggregation
+        group_keys = ["bst"] if not group_by_day else ["Betriebstag","bst"]
+        agg_cols = [
+            pl.sum("c_NRWs").alias("inter_NRWs"),
+            pl.sum("c_NichtNRWs").alias("inter_NichtNRWs"),
+            pl.sum("c_gemischt").alias("inter_gemischt"),
+        ]
+        if split_nrw_state:
+            agg_cols += [
+                pl.sum("c_gemischt_fromNRW").alias("inter_gemischt_fromNRW"),
+                pl.sum("c_gemischt_enterLater").alias("inter_gemischt_enterLater"),
+            ]
+
+        per_bst = (
+            counts.group_by(group_keys).agg(agg_cols).sort(group_keys)
+        )
+        debug_df = counts  # zur Kontrolle (Buckets & Counts)
+
+        return per_bst, debug_df
+
+    elif mode == "unique_per_day":
+        # 1) Präsenz auf Bucket-Ebene deduplizieren
+        ev_binned = (
+            ev.select(["Betriebstag","zn","bst","t_bucket"]).unique()
+        )
+
+        # 2) Paarbildung nur innerhalb (Tag, bst, Bucket)
+        pairs_bucket = (
+            ev_binned.join(ev_binned, on=["Betriebstag","bst","t_bucket"], how="inner", suffix="_r")
+                     .filter(pl.col("zn") < pl.col("zn_r"))  # jede Paarung nur 1x
+                     .select(["Betriebstag","bst","zn","zn_r"])
+        )
+
+        # 3) Einzigartige Paare je Tag&Station (über Buckets deduplizieren)
+        pairs_unique = pairs_bucket.unique(subset=["Betriebstag","bst","zn","zn_r"])
+
+        # 4) NRW-Label pro (Tag, zn)
+        nrw_trains = (
+            ev.group_by(["Betriebstag","zn"])
+              .agg(pl.col("in_nrw").any().alias("is_nrw"))
+        )
+
+        pairs_labeled = (
+            pairs_unique
+            .join(nrw_trains, on=["Betriebstag","zn"], how="left")
+            .rename({"is_nrw":"is_nrw_left"})
+            .join(nrw_trains, left_on=["Betriebstag","zn_r"], right_on=["Betriebstag","zn"], how="left")
+            .rename({"is_nrw":"is_nrw_right"})
+            .with_columns([
+                (pl.col("is_nrw_left") & pl.col("is_nrw_right")).alias("pair_nrw_nrw"),
+                (~pl.col("is_nrw_left") & ~pl.col("is_nrw_right")).alias("pair_non_non"),
+                (pl.col("is_nrw_left") ^ pl.col("is_nrw_right")).alias("pair_mixed"),
+            ])
+        )
+
+        # 5) Aggregation
+        group_keys = ["bst"] if not group_by_day else ["Betriebstag","bst"]
+        per_bst = (
+            pairs_labeled.group_by(group_keys)
+              .agg([
+                  pl.sum("pair_nrw_nrw").alias("inter_NRWs"),
+                  pl.sum("pair_NichtNRWs").alias("inter_NichtNRWs")  # alias gleich halten
+              ])
+        )
+        # Achtung: oben haben wir "pair_non_non" berechnet – korrekt aliasen:
+        per_bst = per_bst.drop(["inter_NichtNRWs"]) \
+                         .join(
+                             pairs_labeled.group_by(group_keys).agg(pl.sum("pair_non_non").alias("inter_NichtNRWs")),
+                             on=group_keys, how="left"
+                         )
+
+        per_bst = per_bst.join(
+            pairs_labeled.group_by(group_keys).agg(pl.sum("pair_mixed").alias("inter_gemischt")),
+            on=group_keys, how="left"
+        ).sort(group_keys)
+
+        debug_df = pairs_labeled  # zur Kontrolle (einzigartige Paare je Tag/Station)
+
+        return per_bst, debug_df
+
+    else:
+        raise ValueError("mode muss 'bucket_combinatorics' oder 'unique_per_day' sein.")
+
+
+# Kombinatorik (zeitgewichtet), 10-Minuten-Buckets, mit Split:
+per_bst_rate, debug_buckets = interactions_nrw(
+    df_zlm,
+    nrw_bsts,
+    window_minutes=10,
+    mode="bucket_combinatorics",
+    split_nrw_state=True,
+    group_by_day=False,
+)
+
+# Einzigartige Begegnungen je Tag&Station (jede Paarung max. 1×/Tag):
+per_bst_unique, debug_pairs = interactions_nrw(
+    df_zlm,
+    nrw_bsts,
+    window_minutes=10,          # Bucketing zum Co-Location-Nachweis
+    mode="unique_per_day",
+    group_by_day=True,          # optional: je Tag ausgeben
+)
