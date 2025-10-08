@@ -1,0 +1,33 @@
+# --- 7️⃣ Saubere Summary-Berechnung ---
+summary = (
+    edges_full.select([
+        "Kategorie", "km", "zugkm_nrw", "zugkm_non"
+    ])
+    .with_columns([
+        # Überlappungsstrecken haben beide > 0
+        ((pl.col("zugkm_nrw") > 0) & (pl.col("zugkm_non") > 0)).alias("is_overlap")
+    ])
+)
+
+# Gesamtsummen berechnen
+sum_total = {
+    "Zugkm_NRW": summary["zugkm_nrw"].sum(),
+    "Zugkm_NichtNRW": summary["zugkm_non"].sum(),
+    "Zugkm_Overlap": summary.filter(pl.col("is_overlap"))["km"].sum()
+}
+
+summary_table = pl.DataFrame([
+    {"Kategorie": "NRW-nur",
+     "Zugkm": summary.filter(pl.col("Kategorie") == "NRW-nur")["zugkm_nrw"].sum(),
+     "Kanten": summary.filter(pl.col("Kategorie") == "NRW-nur").height,
+     "Km": summary.filter(pl.col("Kategorie") == "NRW-nur")["km"].sum()},
+    {"Kategorie": "Nicht-NRW-nur",
+     "Zugkm": summary.filter(pl.col("Kategorie") == "Nicht-NRW-nur")["zugkm_non"].sum(),
+     "Kanten": summary.filter(pl.col("Kategorie") == "Nicht-NRW-nur").height,
+     "Km": summary.filter(pl.col("Kategorie") == "Nicht-NRW-nur")["km"].sum()},
+    {"Kategorie": "Overlap",
+     "Zugkm_NRW": summary.filter(pl.col("is_overlap"))["zugkm_nrw"].sum(),
+     "Zugkm_NichtNRW": summary.filter(pl.col("is_overlap"))["zugkm_non"].sum(),
+     "Kanten": summary.filter(pl.col("is_overlap")).height,
+     "Km": summary.filter(pl.col("is_overlap"))["km"].sum()},
+])
