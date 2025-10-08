@@ -1,0 +1,26 @@
+edge_counts = (
+    edge_stats
+    .group_by(["prev_bst", "bst"])
+    .agg([
+        (pl.when(pl.col("zug_typ") == "NRW")
+           .then(pl.col("fahrten"))
+           .otherwise(0)
+           .sum()
+           .alias("fahrten_nrw")),
+        (pl.when(pl.col("zug_typ") == "Nicht-NRW")
+           .then(pl.col("fahrten"))
+           .otherwise(0)
+           .sum()
+           .alias("fahrten_non")),
+    ])
+    .with_columns(
+        pl.when((pl.col("fahrten_nrw") > 0) & (pl.col("fahrten_non") > 0))
+          .then(pl.lit("Overlap"))
+          .when(pl.col("fahrten_nrw") > 0)
+          .then(pl.lit("NRW-nur"))
+          .when(pl.col("fahrten_non") > 0)
+          .then(pl.lit("Nicht-NRW-nur"))
+          .otherwise(pl.lit("Unbenutzt"))
+          .alias("Kategorie")
+    )
+)
