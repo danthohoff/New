@@ -1,0 +1,221 @@
+import polars as pl
+
+def interactions_nrw(
+    df_zlm: pl.DataFrame,
+    nrw_bsts: list[str],
+    *,
+    window_minutes: int = 10,
+    mode: str = "bucket_combinatorics",   # "bucket_combinatorics" | "unique_per_day"
+    split_nrw_state: bool = True,         # in beiden Modi verfügbar (robust via first_nrw_time)
+    group_by_day: bool = False,           # True → je Betriebstag zurückgeben
+    include_checks: bool = False,         # Konsistenz-Spalten (_sum_chk_*) mit ausgeben
+    drop_problematic: bool = True,        # Problem-Zeilen (Checks ≠ 0) entfernen
+    verbose: bool = True,                 # betroffene (Tag, bst) in Konsole ausgeben
+) -> tuple[pl.DataFrame, pl.DataFrame]:
+    """
+    Einheitliche Interaktionszählung NRW vs. Nicht-NRW an Betriebsstellen.
+    Erwartete Spalten in df_zlm: "Betriebstag", "zn", "bst", "istzeit_dt" (Datetime)
+    """
+
+    # 0) Basis + NRW-Flag + disjunkter Bucket
+    ev = (
+        df_zlm
+        .select(["Betriebstag", "zn", "bst", "istzeit_dt"])
+        .with_columns([
+            pl.col("bst").is_in(nrw_bsts).alias("in_nrw"),
+        ])
+        .sort(["Betriebstag", "zn", "istzeit_dt"])
+        .with_columns([
+            pl.col("in_nrw").any().over(["Betriebstag","zn"]).alias("is_nrw_train"),
+            pl.col("istzeit_dt").dt.truncate(f"{window_minutes}m").alias("t_bucket"),
+        ])
+    )
+
+    # first_nrw_time (erster NRW-Zeitpunkt je (Tag, Zug))
+    first_nrw = (
+        ev.filter(pl.col("in_nrw"))
+          .group_by(["Betriebstag","zn"])
+          .agg(pl.col("istzeit_dt").min().alias("first_nrw_time"))
+    )
+    ev = ev.join(first_nrw, on=["Betriebstag","zn"], how="left")
+
+    # --------------------------------------------
+    # MODE 1: BUCKET COMBINATORICS (zeitgewichtet)
+    # --------------------------------------------
+    if mode == "bucket_combinatorics":
+        # Dedupe: jeder Zug pro (Tag, BST, Bucket) nur einmal
+        ev_dedup = (
+            ev.unique(subset=["Betriebstag","zn","bst","t_bucket"])
+              .with_columns([
+                  (pl.col("is_nrw_train") & (pl.col("istzeit_dt") <  pl.col("first_nrw_time"))).fill_null(False).alias("enter_flag"),
+                  (pl.col("is_nrw_train") & (pl.col("istzeit_dt") >= pl.col("first_nrw_time"))).fill_null(False).alias("from_flag"),
+              ])
+        )
+
+        counts = (
+            ev_dedup.group_by(["Betriebstag","bst","t_bucket"])
+            .agg([
+                pl.col("is_nrw_train").sum().cast(pl.Int64).alias("n_nrw"),
+                (~pl.col("is_nrw_train")).sum().cast(pl.Int64).alias("n_non"),
+                pl.col("from_flag").sum().cast(pl.Int64).alias("n_from"),
+                pl.col("enter_flag").sum().cast(pl.Int64).alias("n_enter"),
+            ])
+            .with_columns([
+                (pl.col("n_from") + pl.col("n_enter") - pl.col("n_nrw")).alias("_chk_part"),
+                (pl.col("n_nrw") * (pl.col("n_nrw") - 1) // 2).alias("c_NRWs"),
+                (pl.col("n_non") * (pl.col("n_non") - 1) // 2).alias("c_NichtNRWs"),
+                (pl.col("n_nrw") * pl.col("n_non")).alias("c_gemischt"),
+            ])
+        )
+
+        if split_nrw_state:
+            counts = counts.with_columns([
+                (pl.col("n_from")  * pl.col("n_non")).alias("c_gemischt_fromNRW"),
+                (pl.col("n_enter") * pl.col("n_non")).alias("c_gemischt_enterLater"),
+                (pl.col("c_gemischt_fromNRW") + pl.col("c_gemischt_enterLater") - pl.col("c_gemischt")).alias("_chk_mix"),
+            ])
+        else:
+            counts = counts.with_columns([
+                pl.lit(0).alias("c_gemischt_fromNRW"),
+                pl.lit(0).alias("c_gemischt_enterLater"),
+                pl.lit(0).alias("_chk_mix"),
+            ])
+
+        group_keys = ["bst"] if not group_by_day else ["Betriebstag","bst"]
+        agg_cols = [
+            pl.sum("c_NRWs").alias("inter_NRWs"),
+            pl.sum("c_NichtNRWs").alias("inter_NichtNRWs"),
+            pl.sum("c_gemischt").alias("inter_gemischt"),
+            pl.sum("_chk_part").alias("_sum_chk_part"),
+            pl.sum("_chk_mix").alias("_sum_chk_mix"),
+        ]
+        if split_nrw_state:
+            agg_cols += [
+                pl.sum("c_gemischt_fromNRW").alias("inter_gemischt_fromNRW"),
+                pl.sum("c_gemischt_enterLater").alias("inter_gemischt_enterLater"),
+            ]
+
+        per_bst = counts.group_by(group_keys).agg(agg_cols).sort(group_keys)
+        debug_df = counts
+
+    # --------------------------------------------
+    # MODE 2: UNIQUE PER DAY (jede Paarung 1×/Tag/BST)
+    # --------------------------------------------
+    elif mode == "unique_per_day":
+        ev_binned = ev.select(["Betriebstag","zn","bst","t_bucket","istzeit_dt","is_nrw_train","first_nrw_time"]).unique()
+
+        ev_time = (
+            ev_binned.group_by(["Betriebstag","zn","bst","t_bucket"])
+                     .agg(pl.col("istzeit_dt").min().alias("approx_time"))
+        )
+
+        pairs_bucket = (
+            ev_time.join(ev_time, on=["Betriebstag","bst","t_bucket"], how="inner", suffix="_r")
+                   .filter(pl.col("zn") < pl.col("zn_r"))
+                   .select(["Betriebstag","bst","zn","zn_r","approx_time","approx_time_r"])
+        )
+
+        pairs_unique = pairs_bucket.unique(subset=["Betriebstag","bst","zn","zn_r"])
+
+        nrw_info = (
+            ev.select(["Betriebstag","zn","is_nrw_train","first_nrw_time"]).unique(subset=["Betriebstag","zn"])
+        )
+
+        pairs_labeled = (
+            pairs_unique
+            .join(nrw_info, on=["Betriebstag","zn"], how="left")
+            .rename({"is_nrw_train":"is_nrw_left","first_nrw_time":"first_left"})
+            .join(nrw_info, left_on=["Betriebstag","zn_r"], right_on=["Betriebstag","zn"], how="left")
+            .rename({"is_nrw_train":"is_nrw_right","first_nrw_time":"first_right"})
+            .with_columns([
+                (pl.col("is_nrw_left") & pl.col("is_nrw_right")).alias("pair_nrw_nrw"),
+                (~pl.col("is_nrw_left") & ~pl.col("is_nrw_right")).alias("pair_non_non"),
+                (pl.col("is_nrw_left") ^ pl.col("is_nrw_right")).alias("pair_mixed"),
+            ])
+        )
+
+        if split_nrw_state:
+            pairs_labeled = pairs_labeled.with_columns([
+                (
+                    (pl.col("is_nrw_left") & ~pl.col("is_nrw_right") & (pl.col("approx_time")   >= pl.col("first_left")))
+                    | (pl.col("is_nrw_right") & ~pl.col("is_nrw_left") & (pl.col("approx_time_r") >= pl.col("first_right")))
+                ).fill_null(False).alias("pair_mixed_fromNRW"),
+                (
+                    (pl.col("is_nrw_left") & ~pl.col("is_nrw_right") & (pl.col("approx_time")   <  pl.col("first_left")))
+                    | (pl.col("is_nrw_right") & ~pl.col("is_nrw_left") & (pl.col("approx_time_r") <  pl.col("first_right")))
+                ).fill_null(False).alias("pair_mixed_enterLater"),
+            ])
+        else:
+            pairs_labeled = pairs_labeled.with_columns([
+                pl.lit(False).alias("pair_mixed_fromNRW"),
+                pl.lit(False).alias("pair_mixed_enterLater"),
+            ])
+
+        group_keys = ["bst"] if not group_by_day else ["Betriebstag","bst"]
+        agg_cols = [
+            pl.sum("pair_nrw_nrw").alias("inter_NRWs"),
+            pl.sum("pair_non_non").alias("inter_NichtNRWs"),
+            pl.sum("pair_mixed").alias("inter_gemischt"),
+        ]
+        if split_nrw_state:
+            agg_cols += [
+                pl.sum("pair_mixed_fromNRW").alias("inter_gemischt_fromNRW"),
+                pl.sum("pair_mixed_enterLater").alias("inter_gemischt_enterLater"),
+            ]
+
+        per_bst = pairs_labeled.group_by(group_keys).agg(agg_cols).sort(group_keys)
+
+        # Check: Splits vs. Summe (nur wenn split aktiv)
+        if split_nrw_state:
+            per_bst = per_bst.with_columns([
+                (pl.col("inter_gemischt_fromNRW").fill_null(0) + pl.col("inter_gemischt_enterLater").fill_null(0) - pl.col("inter_gemischt").fill_null(0)).alias("_sum_chk_mix")
+            ])
+        else:
+            per_bst = per_bst.with_columns([pl.lit(0).alias("_sum_chk_mix")])
+
+        debug_df = pairs_labeled
+
+    else:
+        raise ValueError("mode muss 'bucket_combinatorics' oder 'unique_per_day' sein.")
+
+    # --------------------------------------------
+    # Problematische Zeilen droppen + loggen
+    # --------------------------------------------
+    # Welche Check-Spalten existieren?
+    check_cols = [c for c in ["_sum_chk_part", "_sum_chk_mix"] if c in per_bst.columns]
+
+    if drop_problematic and check_cols:
+        # Problem-Flag: irgendein Check ≠ 0
+        problem_flag = None
+        for c in check_cols:
+            flag_c = pl.col(c).fill_null(0) != 0
+            problem_flag = flag_c if problem_flag is None else (problem_flag | flag_c)
+
+        bad = per_bst.filter(problem_flag) if problem_flag is not None else pl.DataFrame()
+
+        if bad.height > 0 and verbose:
+            if group_by_day:
+                # Zeige (Tag, bst)
+                rows = bad.select(["Betriebstag","bst"] + check_cols).to_pandas().to_dict(orient="records")
+                print("⚠️ Problematische (Betriebstag, BST) wegen Check≠0:")
+                for r in rows:
+                    print(f"  - {r['Betriebstag']} / {r['bst']} | " +
+                          ", ".join(f"{c}={r.get(c)}" for c in check_cols))
+            else:
+                rows = bad.select(["bst"] + check_cols).to_pandas().to_dict(orient="records")
+                print("⚠️ Problematische BST wegen Check≠0:")
+                for r in rows:
+                    print(f"  - {r['bst']} | " +
+                          ", ".join(f"{c}={r.get(c)}" for c in check_cols))
+
+        # Droppen
+        if problem_flag is not None:
+            per_bst = per_bst.filter(~problem_flag)
+
+    # Check-Spalten ggf. wieder entfernen
+    if not include_checks:
+        for c in ["_sum_chk_part", "_sum_chk_mix"]:
+            if c in per_bst.columns:
+                per_bst = per_bst.drop(c)
+
+    return per_bst, debug_df
