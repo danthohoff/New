@@ -1,0 +1,102 @@
+import numpy as np
+import polars as pl
+import matplotlib.pyplot as plt
+
+def plot_startdelay_bin_summary_clean(
+    per_bin: pl.DataFrame,
+    *,
+    show_mean: bool = False,
+    smooth_bins: int = 0,           # z.B. 5 für Rolling-Median über 5 Bins; 0 = aus
+    min_points_for_marker: int = 1, # erst ab so vielen Zügen im Bin Punkte zeigen
+    figsize=(11,5),
+):
+    """
+    Visualisiert je Startverspätungs-Bin:
+      - Balken: Anzahl Züge im Bin (linke y-Achse)
+      - Punkte: Median-Pünktlichkeitsquote in % (rechte y-Achse)
+      - Optional: geglättete Linie (Rolling-Median) der Quote
+
+    Erwartete Spalten in per_bin:
+      ['bin_idx','bin_start_s','bin_end_s','n_zuege',
+       'punct_rate_median','punct_rate_mean']
+    """
+    # Polars -> NumPy
+    x_left  = per_bin["bin_start_s"].to_numpy()
+    width   = (per_bin["bin_end_s"] - per_bin["bin_start_s"]).to_numpy()
+    n       = per_bin["n_zuege"].to_numpy()
+
+    # Punkte auf Bin-Mitte legen
+    x_mid   = x_left + width / 2.0
+
+    # Pünktlichkeit in %; NaNs beibehalten, nicht 0 füllen
+    med_pct = (per_bin["punct_rate_median"] * 100).to_numpy()
+    mean_pct = (per_bin["punct_rate_mean"] * 100).to_numpy() if "punct_rate_mean" in per_bin.columns else None
+
+    # Nur Bins mit genügend Beobachtungen markieren
+    mask_pts = n >= min_points_for_marker
+    x_pts = x_mid[mask_pts]
+    med_pts = med_pct[mask_pts]
+    mean_pts = mean_pct[mask_pts] if show_mean and mean_pct is not None else None
+
+    # Optional glätten (Rolling über Bins mit vorhandenen Werten)
+    if smooth_bins and smooth_bins > 1:
+        # einfache Rolling-Median über nicht-NaN Punkte
+        def rolling_median(x, y, win):
+            valid = ~np.isnan(y)
+            xv, yv = x[valid], y[valid]
+            if len(yv) == 0:
+                return xv, yv
+            half = win // 2
+            y_sm = np.empty_like(yv)
+            for i in range(len(yv)):
+                lo = max(0, i - half)
+                hi = min(len(yv), i + half + 1)
+                y_sm[i] = np.median(yv[lo:hi])
+            return xv, y_sm
+
+        x_smooth, med_smooth = rolling_median(x_pts, med_pts, smooth_bins)
+    else:
+        x_smooth, med_smooth = None, None
+
+    # ---------- Plot ----------
+    fig, ax1 = plt.subplots(figsize=figsize)
+
+    # Bars: Anzahl Züge je Bin (linke Achse)
+    ax1.bar(x_left, n, width=width, align="edge", alpha=0.6, edgecolor="white")
+    ax1.set_xlabel("Startverspätung (Sekunden)")
+    ax1.set_ylabel("Anzahl Züge je Bin")
+
+    # Punkte/Linien: Pünktlichkeitsquote (rechte Achse)
+    ax2 = ax1.twinx()
+    if len(x_pts) > 0:
+        ax2.scatter(x_pts, med_pts, s=20, marker="o", alpha=0.9, label="Median Pünktlichkeitsquote")
+        if show_mean and mean_pts is not None:
+            ax2.scatter(x_pts, mean_pts, s=16, marker="x", alpha=0.7, label="Mittelwert Pünktlichkeitsquote")
+        if med_smooth is not None and len(med_smooth) > 0:
+            ax2.plot(x_smooth, med_smooth, linewidth=1.5, alpha=0.9, label=f"Rolling-Median ({smooth_bins} Bins)")
+    ax2.set_ylabel("Pünktlichkeitsquote [%]")
+    ax2.set_ylim(0, 100)
+
+    # Legende nur auf rechter Achse
+    ax2.legend(loc="upper right")
+
+    # Dezentes Grid
+    ax1.grid(axis="both", alpha=0.25)
+    fig.tight_layout()
+    plt.show()
+
+
+per_bin, per_train = startdelay_bins_with_punct(
+    df_zlm,
+    bin_size_sec=30,
+    max_delay_min=30,
+    only_after_start=True,
+)
+
+# z.B. erst ab 50 Zügen pro Bin Punkte zeigen, und leichte Glättung über 5 Bins
+plot_startdelay_bin_summary_clean(
+    per_bin,
+    show_mean=False,
+    smooth_bins=5,
+    min_points_for_marker=50,
+)
