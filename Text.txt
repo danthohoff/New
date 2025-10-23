@@ -1,0 +1,140 @@
+import polars as pl
+import numpy as np
+import matplotlib.pyplot as plt
+
+def startdelay_bins_with_punct(
+    df_zlm: pl.DataFrame,
+    *,
+    bin_size_sec: int = 30,
+    max_delay_min: int = 30,
+    only_after_start: bool = True,   # nur Halte NACH Start berücksichtigen
+):
+    """
+    Liefert je Startverspätungs-Bin:
+      - Anzahl Züge
+      - Mittelwert & Median der Zug-Pünktlichkeitsquote (Anteil pünktlicher Halte vsp<360)
+    und eine DataFrame mit allen per-Zug Kennzahlen (für Debug/Drilldown).
+
+    Erwartete Spalten in df_zlm:
+      'Betriebstag' (date), 'zn' (Zugnummer), 'fsStatus' (int), 'istzeit_dt' (datetime), 'vsp' (Sekunden)
+    """
+
+    # --- 1) Start-Ereignisse (fsStatus==2): pro (Tag,Zug) genau eins ---
+    starts = (
+        df_zlm
+        .filter(pl.col("fsStatus") == 2)
+        .select(["Betriebstag","zn","istzeit_dt","vsp"])
+        .rename({"istzeit_dt":"start_time", "vsp":"vsp_start"})
+        # falls es mehrere "2" gibt: den frühesten Start pro (Tag,Zug)
+        .sort(["Betriebstag","zn","start_time"])
+        .group_by(["Betriebstag","zn"])
+        .agg([
+            pl.first("start_time").alias("start_time"),
+            pl.first("vsp_start").alias("vsp_start")
+        ])
+    )
+
+    # --- 2) Halte-Ereignisse (fsStatus 1/3) ---
+    halts = (
+        df_zlm
+        .filter(pl.col("fsStatus").is_in([1,3]))
+        .select(["Betriebstag","zn","istzeit_dt","vsp"])
+        # Dedupe Sicherheitsmaßnahme: ein Halt-Zeitpunkt je (Tag,Zug,istzeit_dt) einmal
+        .unique(subset=["Betriebstag","zn","istzeit_dt"])
+        .with_columns((pl.col("vsp") < 360).alias("halt_punct"))
+    )
+
+    # --- 3) Halte mit Start verknüpfen & (optional) nur Halte NACH Start ---
+    halts_join = halts.join(starts, on=["Betriebstag","zn"], how="inner")
+    if only_after_start:
+        halts_join = halts_join.filter(pl.col("istzeit_dt") >= pl.col("start_time"))
+
+    # --- 4) pro Zug Pünktlichkeitsquote & Halte zählen ---
+    per_train = (
+        halts_join
+        .group_by(["Betriebstag","zn", "start_time", "vsp_start"])
+        .agg([
+            pl.len().alias("halte"),
+            pl.sum("halt_punct").alias("halte_puenktlich"),
+        ])
+        .with_columns(
+            (pl.col("halte_puenktlich") / pl.col("halte")).alias("punct_rate")
+        )
+    )
+
+    # Hinweis: Züge ohne (nachgelagerte) Halte fallen hier raus. Optional kann man sie mit punct_rate=None
+    # anhängen, wenn man will:
+    # per_train = starts.join(per_train, on=["Betriebstag","zn","start_time","vsp_start"], how="left")
+
+    # --- 5) Startverspätungen in Bins packen ---
+    max_delay_sec = max_delay_min * 60
+    # nur Werte im betrachteten Fenster
+    per_train = per_train.filter(pl.col("vsp_start").abs() <= max_delay_sec)
+
+    # diskrete Bin-Indizes und -Kanten
+    nbins = 2 * (max_delay_sec // bin_size_sec) + 1  # symmetrisch um 0
+    # bin_index: -max ... +max
+    per_train = per_train.with_columns([
+        ((pl.col("vsp_start") + max_delay_sec) // bin_size_sec).cast(pl.Int64).alias("bin_idx")
+    ])
+    # Bin-Start/-Ende in Sekunden (für schöne Label & Sortierung)
+    per_train = per_train.with_columns([
+        (pl.col("bin_idx") * bin_size_sec - max_delay_sec).alias("bin_start_s"),
+        (pl.col("bin_idx") * bin_size_sec - max_delay_sec + bin_size_sec).alias("bin_end_s"),
+    ])
+
+    # --- 6) Aggregation pro Bin ---
+    per_bin = (
+        per_train
+        .group_by(["bin_idx","bin_start_s","bin_end_s"])
+        .agg([
+            pl.len().alias("n_zuege"),
+            pl.median("punct_rate").alias("punct_rate_median"),
+            pl.mean("punct_rate").alias("punct_rate_mean"),
+            pl.median("vsp_start").alias("vsp_start_median"),
+            pl.mean("vsp_start").alias("vsp_start_mean"),
+            pl.median("halte").alias("halte_median"),
+            pl.mean("halte").alias("halte_mean"),
+        ])
+        .sort("bin_idx")
+    )
+
+    return per_bin, per_train
+
+
+def plot_startdelay_bin_summary(per_bin: pl.DataFrame):
+    """
+    Kleines Kombi-Chart: Balken = n_zuege je Bin; Linie = median punct_rate (0..1)
+    """
+    x = per_bin["bin_start_s"].to_numpy()      # linke Bin-Kante in s
+    n = per_bin["n_zuege"].to_numpy()
+    med = per_bin["punct_rate_median"].fill_null(0).to_numpy()
+
+    fig, ax1 = plt.subplots(figsize=(10,5))
+    width = (per_bin["bin_end_s"] - per_bin["bin_start_s"]).to_numpy()
+    ax1.bar(x, n, width=width, align="edge", alpha=0.6, edgecolor="white")
+    ax1.set_xlabel("Startverspätung-Bin (Sekunden; linke Kante)")
+    ax1.set_ylabel("Anzahl Züge je Bin")
+
+    ax2 = ax1.twinx()
+    ax2.plot(x + width/2, med, linestyle="-", marker=None)
+    ax2.set_ylabel("Median Pünktlichkeitsquote")
+    ax2.set_ylim(0, 1)
+
+    ax1.set_title("Startverspätung (Binning) vs. Zug-Pünktlichkeit (nach Start)")
+    fig.tight_layout()
+    plt.show()
+
+
+per_bin, per_train = startdelay_bins_with_punct(
+    df_zlm,
+    bin_size_sec=30,
+    max_delay_min=30,
+    only_after_start=True,   # typischerweise: nur Halte nach dem Start
+)
+
+# Tabelle ansehen
+print(per_bin.head(10))
+
+# Plot
+plot_startdelay_bin_summary(per_bin)
