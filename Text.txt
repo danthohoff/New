@@ -1,0 +1,152 @@
+import numpy as np
+import matplotlib.pyplot as plt
+import polars as pl
+
+def plot_hist_with_punct_boxplots(
+    per_train: pl.DataFrame,
+    *,
+    bin_size_sec: int = 30,
+    max_delay_min: int = 30,
+    min_points_for_box: int = 20,   # erst ab so vielen Zügen Boxplot zeichnen
+    figsize=(12,6)
+):
+    # Filter auf Delay-Fenster
+    max_delay_sec = max_delay_min * 60
+    df = per_train.filter(pl.col("vsp_start").abs() <= max_delay_sec)
+
+    # Bin-Grenzen und Labels
+    edges = np.arange(-max_delay_sec, max_delay_sec + bin_size_sec, bin_size_sec)
+    centers = (edges[:-1] + edges[1:]) / 2.0
+
+    # Histogramm (Counts) über alle Züge
+    vsp = df["vsp_start"].to_numpy()
+    counts, _ = np.histogram(vsp, bins=edges)
+
+    # Pünktlichkeitswerte (0..1) je Bin sammeln (pro Zuglauf eine punct_rate)
+    df_np = df.select(["vsp_start", "punct_rate"]).to_numpy()
+    # Liste von Arrays: für jeden Bin ein Array an punct_rate
+    punct_lists = [[] for _ in range(len(edges)-1)]
+    for vsp_i, pr_i in df_np:
+        # skip NaNs
+        if pr_i is None or np.isnan(pr_i):
+            continue
+        # Bin-Index
+        idx = int((vsp_i - edges[0]) // bin_size_sec)
+        if 0 <= idx < len(punct_lists):
+            punct_lists[idx].append(float(pr_i) * 100.0)  # in %
+    # Nur Bins mit genug Punkten behalten
+    box_data = [np.array(x) if len(x) >= min_points_for_box else np.array([])
+                for x in punct_lists]
+
+    # --- Plot ---
+    fig, ax1 = plt.subplots(figsize=figsize)
+
+    # 1) Histogramm (linke Achse)
+    ax1.bar(edges[:-1], counts, width=bin_size_sec, align="edge",
+            alpha=0.6, edgecolor="white", label="Züge je Startdelay-Bin")
+    ax1.set_xlabel("Startverspätung (Sekunden)")
+    ax1.set_ylabel("Anzahl Züge je Bin")
+    ax1.grid(alpha=0.25)
+
+    # 2) Boxplots (rechte Achse, in %)
+    ax2 = ax1.twinx()
+    # Positionen der Boxplots sind die Bin-Zentren:
+    positions = centers
+    # Für leere Bins keine Box zeichnen: wir geben nur die nicht-leeren rüber
+    positions_nonempty = [p for p, arr in zip(positions, box_data) if arr.size > 0]
+    box_data_nonempty  = [arr for arr in box_data if arr.size > 0]
+
+    if len(box_data_nonempty) > 0:
+        bp = ax2.boxplot(
+            box_data_nonempty,
+            positions=positions_nonempty,
+            widths=bin_size_sec * 0.8,
+            patch_artist=True,
+            showfliers=True,
+            boxprops=dict(alpha=0.35),
+            medianprops=dict(linewidth=1.5),
+        )
+        ax2.set_ylim(0, 100)
+        ax2.set_ylabel("Pünktlichkeitsquote [%]")
+    else:
+        ax2.set_ylim(0, 100)
+        ax2.set_ylabel("Pünktlichkeitsquote [%]")
+
+    plt.title("Startverspätung: Histogramm (Zahl Züge) + Boxplots der Pünktlichkeitsquote je Bin")
+    fig.tight_layout()
+    plt.show()
+
+
+
+import seaborn as sns
+
+def plot_conditional_heatmap_from_per_train(
+    per_train: pl.DataFrame,
+    *,
+    bin_size_sec: int = 30,
+    max_delay_min: int = 30,
+    punct_step: float = 0.05,      # 5%-Schritte
+    min_total_per_delaybin: int = 10,  # zu dünne Delay-Bins maskieren
+    figsize=(12,6)
+):
+    max_delay_sec = max_delay_min * 60
+    df = per_train.filter(pl.col("vsp_start").abs() <= max_delay_sec) \
+                  .select(["vsp_start","punct_rate"]) \
+                  .to_pandas()
+    # Drop NaNs
+    df = df.dropna(subset=["vsp_start","punct_rate"])
+
+    # Bin-Kanten
+    delay_edges = np.arange(-max_delay_sec, max_delay_sec + bin_size_sec, bin_size_sec)
+    punct_edges = np.arange(0.0, 1.0 + 1e-9, punct_step)  # 0..1 in 5%-Schritten
+
+    # 2D-Histogramm: counts pro (delay_bin, punct_bin)
+    H, xedges, yedges = np.histogram2d(df["vsp_start"], df["punct_rate"], bins=[delay_edges, punct_edges])
+
+    # Bedingt normalisieren: p(punct | delay) (Zeilen sind delay-Bins)
+    row_sums = H.sum(axis=1, keepdims=True)  # shape (n_delay_bins, 1)
+    with np.errstate(divide='ignore', invalid='ignore'):
+        H_cond = np.where(row_sums > 0, H / row_sums, np.nan)
+
+    # Zu dünne delay-Bins maskieren (optional)
+    thin = (row_sums.flatten() < min_total_per_delaybin)
+    if thin.any():
+        H_cond[thin, :] = np.nan
+
+    # Achsenbeschriftung: Delay in Minuten, Pünktlichkeit in %
+    xlabels = (xedges[:-1] / 60.0).astype(int)
+    ylabels = (yedges[:-1] * 100).astype(int)
+
+    plt.figure(figsize=figsize)
+    sns.heatmap(
+        H_cond.T,
+        cmap="viridis",
+        cbar_kws={"label": "p(Pünktlichkeit | Startverspätung)"},
+        xticklabels=xlabels,
+        yticklabels=ylabels,
+        vmin=0, vmax=np.nanmax(H_cond),
+    )
+    plt.xlabel("Startverspätung (Minuten)")
+    plt.ylabel("Pünktlichkeitsquote-Bins [%]")
+    plt.title("Bedingte Verteilung p(Pünktlichkeit | Startverspätung) (5%-Bins)")
+    plt.tight_layout()
+    plt.show()
+
+
+# Angenommen, du hast schon:
+# per_bin, per_train = startdelay_bins_with_punct(...)
+
+plot_hist_with_punct_boxplots(
+    per_train,
+    bin_size_sec=30,
+    max_delay_min=30,
+    min_points_for_box=20
+)
+
+plot_conditional_heatmap_from_per_train(
+    per_train,
+    bin_size_sec=30,
+    max_delay_min=30,
+    punct_step=0.05,           # 5%-Bins
+    min_total_per_delaybin=10  # dünne Delay-Bins ausblenden
+)
