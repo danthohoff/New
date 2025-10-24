@@ -1,0 +1,121 @@
+import numpy as np
+import polars as pl
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+def plot_conditional_heatmap_from_per_train_v2(
+    per_train: pl.DataFrame,
+    *,
+    bin_size_sec: int = 30,        # Startdelay-Binbreite
+    max_delay_min: int = 30,       # ±Fenster
+    punct_step: float = 0.05,      # 5%-Bins in der Pünktlichkeitsquote
+    min_total_per_delaybin: int = 20,  # zu dünne Delay-Bins ausblenden
+    axis_unit: str = "s",          # "s" = Sekunden (Default), "min" = Minuten
+    xtick_every: int | None = None # Schrittweite der x-Ticks (in der gewählten Einheit)
+):
+    assert axis_unit in ("s","min")
+
+    # 1) Daten vorbereiten
+    max_delay_sec = max_delay_min * 60
+    df = (per_train
+          .filter(pl.col("vsp_start").abs() <= max_delay_sec)
+          .select(["vsp_start","punct_rate"])
+          .drop_nulls()
+          .to_pandas())
+
+    # 2) Kanten
+    delay_edges_s = np.arange(-max_delay_sec, max_delay_sec + bin_size_sec, bin_size_sec)  # in Sekunden
+    punct_edges = np.arange(0.0, 1.0 + 1e-9, punct_step)
+
+    # 3) 2D-Histogramm (Counts)
+    H, xedges_s, yedges = np.histogram2d(
+        df["vsp_start"].to_numpy(),
+        df["punct_rate"].to_numpy(),
+        bins=[delay_edges_s, punct_edges]
+    )  # H.shape = (n_delay_bins, n_punct_bins)
+
+    # 4) Bedingt normalisieren: jede x-Spalte (delay-bin) auf 1
+    row_sums = H.sum(axis=1, keepdims=True)  # Summe je Delay-Bin
+    H_cond = np.divide(H, row_sums, out=np.full_like(H, np.nan), where=row_sums>0)
+
+    # dünne Delay-Bins maskieren
+    thin = (row_sums.flatten() < min_total_per_delaybin)
+    if thin.any():
+        H_cond[thin, :] = np.nan
+
+    # 5) Achsen-Einheit umrechnen
+    if axis_unit == "s":
+        x_min, x_max = delay_edges_s[0], delay_edges_s[-1]          # Sekunden
+        x_label = "Startverspätung (Sekunden)"
+        # sinnvolle Default-Ticks in Sekunden
+        if xtick_every is None:
+            # ungefähr 10 Ticks
+            span = x_max - x_min
+            rough = span / 10
+            # runde auf 30/60/120s etc.
+            for step in [30, 60, 120, 180, 300, 600]:
+                if step >= rough:
+                    xtick_every = step
+                    break
+    else:
+        # Minuten
+        x_min, x_max = delay_edges_s[0]/60.0, delay_edges_s[-1]/60.0
+        x_label = "Startverspätung (Minuten)"
+        if xtick_every is None:
+            xtick_every = 5  # alle 5 Minuten
+
+    # 6) Plotten mit exakter Geometrie (extent)
+    plt.figure(figsize=(12, 6))
+
+    # extent = [xmin, xmax, ymin, ymax] in den geplotteten Einheiten
+    if axis_unit == "s":
+        extent = [delay_edges_s[0], delay_edges_s[-1], 0, 100]  # y in %
+    else:
+        extent = [delay_edges_s[0]/60.0, delay_edges_s[-1]/60.0, 0, 100]
+
+    # H_cond hat Achsen (delay, punct); für die Anzeige brauchen wir y in %
+ und origin='lower'
+    sns.heatmap(
+        H_cond.T,  # transponiert: y-Achse = punct
+        cmap="viridis",
+        vmin=0, vmax=np.nanmax(H_cond),
+        cbar_kws={"label":"p(Pünktlichkeits-Bin | Startverspätungs-Bin)"},
+        xticklabels=False, yticklabels=False   # wir setzen gleich manuell
+    )
+
+    ax = plt.gca()
+
+    # x-Ticks manuell setzen (gleichmäßig, in gewünschter Einheit)
+    if axis_unit == "s":
+        xticks = np.arange(x_min, x_max+1e-9, xtick_every)
+        ax.set_xticks(np.interp(xticks, [extent[0], extent[1]], [0, H_cond.shape[0]]))
+        ax.set_xticklabels([f"{int(t)}" for t in xticks], rotation=0)
+    else:
+        xticks = np.arange(x_min, x_max+1e-9, xtick_every)
+        ax.set_xticks(np.interp(xticks, [extent[0], extent[1]], [0, H_cond.shape[0]]))
+        ax.set_xticklabels([f"{int(t)}" for t in xticks], rotation=0)
+
+    # y-Ticks (Pünktlichkeits-Bins in %)
+    yedges_pct = yedges * 100
+    # z. B. nur jeden zweiten/ dritten Tick beschriften:
+    ytick_idx = np.arange(0, len(yedges_pct)-1, max(1, len(yedges_pct)//12))
+    ytick_vals = yedges_pct[ytick_idx]
+    ax.set_yticks(np.interp(ytick_idx, [0, len(yedges_pct)-1], [0, H_cond.shape[1]]))
+    ax.set_yticklabels([f"{int(v)}" for v in ytick_vals])
+
+    # Achsenbeschriftungen
+    ax.set_xlabel(x_label)
+    ax.set_ylabel("Pünktlichkeits-Bins [%]")
+
+    # Nulllinie (bei 0 s bzw. 0 min)
+    if axis_unit == "s":
+        zero_x = 0
+    else:
+        zero_x = 0
+    # Umrechnung Nullposition in Heatmap-Koordinate:
+    zero_pos = np.interp(zero_x, [extent[0], extent[1]], [0, H_cond.shape[0]])
+    ax.axvline(zero_pos, color="k", linewidth=1, alpha=0.6)
+
+    plt.title("Bedingte Verteilung p(Pünktlichkeit | Startverspätung)")
+    plt.tight_layout()
+    plt.show()
