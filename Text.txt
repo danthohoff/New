@@ -1,0 +1,670 @@
+Ja — gute Punkte. Alle drei sind inhaltlich wichtig und zeigen, dass ihr jetzt an der richtigen Stelle schärft: nicht mehr nur „welche Boxen gibt es“, sondern welche Verantwortung hat jede Box genau.
+
+1. Zur Box „Antwort“
+
+Dein Eindruck ist richtig: In der jetzigen Darstellung ist die Box „Antwort“ zu nah an „Chat-Frontend & Dialogsteuerung“. Wenn man sie nicht sauber erklärt, wirkt sie doppelt.
+
+Der saubere Unterschied ist dieser:
+
+Chat-Frontend & Dialogsteuerung
+
+Das ist die Interaktionsschicht.
+Dort wird geregelt, wie der Nutzer mit dem Assistenten spricht und wie die Antwort dargestellt wird.
+
+Dazu gehören:
+
+	•	Eingabefeld
+	•	Chatverlauf
+	•	Session Handling
+	•	Streaming-Darstellung
+	•	Ladeindikatoren
+	•	Rückfragen im UI
+	•	Bedienlogik
+	•	Barrierefreiheit
+	•	Kanalbesonderheiten
+
+Kurz:
+Das Frontend ist die Benutzeroberfläche und die laufende Gesprächsführung auf UI-Ebene.
+
+Antwort
+
+Die Box „Antwort“ beschreibt dagegen nicht die Oberfläche, sondern das fertige Antwortobjekt, das aus der Verarbeitung herauskommt und an das Frontend übergeben wird.
+
+Dazu gehören typischerweise:
+
+	•	finaler Antworttext
+	•	Quellenangaben
+	•	Antworttyp, z. B. normale Antwort, Rückfrage, Verweigerung, Handover-Hinweis
+	•	Metadaten für das Frontend
+	•	Hinweise auf Unsicherheit oder Grenzen
+	•	strukturierte Antwortbestandteile, z. B. Links, Statusinfo, CTA
+
+Kurz:
+Die Box „Antwort“ ist das Ergebnis der Backend-Verarbeitung, nicht die Darstellung selbst.
+
+Warum die Box trotzdem sinnvoll sein kann
+
+Sie ist dann sinnvoll, wenn ihr architektonisch zeigen wollt:
+
+	•	Nach den Output Guardrails ist die Antwort fachlich und regelkonform freigegeben
+	•	Ab diesem Punkt ist sie ein kontrolliertes Ausgabeartefakt
+	•	Erst danach übernimmt das Frontend die Anzeige
+
+Das ist besonders nützlich, wenn ihr später unterscheiden wollt zwischen:
+
+	•	normaler Wissensantwort
+	•	personalisierter Antwort
+	•	Rückfrage
+	•	Verweigerung
+	•	Handover an Mensch
+	•	technische Fehlermeldung / Fallback
+
+Mein Rat
+
+Ihr habt hier zwei saubere Optionen:
+
+Option A: Box „Antwort“ behalten
+
+Dann sollte sie sprachlich präziser heißen, zum Beispiel:
+
+	•	Response Assembly
+	•	Antwortobjekt / Response Layer
+	•	Freigegebene Antwort
+	•	Response Packaging
+
+Das wäre architektonisch klarer als nur „Antwort“.
+
+Option B: Box „Antwort“ entfernen
+
+Wenn ihr die Grafik kompakter halten wollt, könnt ihr sie auch weglassen und den Pfeil direkt von Output Guardrails zurück ins Chat-Frontend führen.
+
+Dann müsste im Text aber erklärt werden, dass:
+
+	•	die Antwort nach der Prüfung an das Frontend zurückgegeben wird,
+	•	dort das Streaming und die Darstellung stattfinden.
+
+Meine Empfehlung
+
+Für eure Architektur würde ich die Box nicht komplett streichen, sondern umbenennen.
+Am besten in:
+
+„Response Assembly & Delivery“
+oder etwas deutscher:
+„Antwortaufbereitung & Übergabe“
+
+Dann ist klar:
+
+	•	Frontend = Darstellung
+	•	Response Assembly = fachlich freigegebenes Ergebnis der Verarbeitung
+
+⸻
+
+2. Wo ist „Data & Memory“ geblieben?
+
+Auch das ist ein sehr guter Punkt.
+Die alte Box Data & Memory war unscharf, aber sie hat auf ein echtes Thema gezeigt: Zustand, Kontext, Gedächtnis und Konfiguration sind wichtig.
+
+In der neuen Grafik ist das Thema nicht verschwunden, sondern es ist implizit verteilt. Das Problem ist nur: Es ist noch nicht sichtbar genug.
+
+Wie man „Memory“ in so einer Architektur sauber denken sollte
+
+Bei „Memory“ muss man unterscheiden. Der Begriff ist in GenAI-Architekturen oft zu ungenau.
+
+A. Session Memory
+
+Das ist der kurzfristige Gesprächskontext innerhalb einer laufenden Sitzung.
+
+Beispiele:
+
+	•	letzte Nutzerfrage
+	•	letzte Assistentenantwort
+	•	offene Rückfrage
+	•	aktuelles Thema
+	•	erkannter Intent
+	•	Gesprächszustand
+
+Das gehört vor allem in:
+
+	•	Chat-Frontend & Dialogsteuerung
+	•	Orchestrator-Agent
+
+B. Conversational State / Workflow State
+
+Das ist der fachliche Bearbeitungszustand eines laufenden Gesprächs oder Workflows.
+
+Beispiele:
+
+	•	Nutzer befindet sich gerade in einer Statusabfrage
+	•	Consent wurde in dieser Session bereits eingeholt
+	•	ein Handover wurde angeboten
+	•	Rückfrage läuft noch
+	•	ein bestimmter Skill ist aktiv
+
+Das gehört vor allem in:
+
+	•	Orchestrator-Agent
+
+C. User Context / Personal Context
+
+Das ist kein Gesprächsgedächtnis, sondern nutzerspezifischer Kontext, der für Personalisierung verwendet wird.
+
+Beispiele:
+
+	•	Rolle
+	•	Organisationseinheit
+	•	Beschäftigtengruppe
+	•	Standort
+	•	bekannte Freigaben
+	•	zulässige Personalisierungsattribute
+
+Das gehört vor allem in:
+
+	•	Identity & Consent
+	•	Integration & Personalization
+
+D. Knowledge Memory
+
+Das ist eigentlich kein „Memory“ im engeren Sinn, sondern die Wissensbasis, auf die der Assistent zugreift.
+
+Beispiele:
+
+	•	Wissensartikel
+	•	Richtlinien
+	•	Dokumente
+	•	freigegebene HR-Inhalte
+	•	Suchindex
+
+Das gehört in:
+
+	•	Knowledge & Retrieval
+	•	Wissensdaten-Pipeline
+
+E. Policy / Consent State
+
+Das ist der Zustand, welche Regeln, Freigaben und Einschränkungen gelten.
+
+Beispiele:
+
+	•	hat Nutzer Opt-in erteilt?
+	•	welche Daten dürfen verwendet werden?
+	•	darf personalisiert geantwortet werden?
+	•	ist nur Read-only erlaubt?
+
+Das gehört in:
+
+	•	Identity & Consent
+	•	Input Guardrails
+	•	Integration & Personalization
+	•	teilweise Policy / Compliance
+
+F. Langzeit-Memory
+
+Das ist das heikelste Thema.
+
+In vielen AI-Diskussionen meint „Memory“ ein längerfristiges Merken über Sitzungen hinweg. Im HR-Kontext würde ich hier sehr vorsichtig sein.
+
+Was man in HR eher will:
+
+	•	kontrollierten Profilkontext
+	•	kontrollierten Consent-Status
+	•	ggf. bekannte Präferenzen, wenn freigegeben
+
+Was man eher nicht unkontrolliert will:
+
+	•	ein frei wachsendes Langzeitgedächtnis des Assistenten über frühere Gespräche
+
+Mein Architektenurteil zu Memory
+
+Für Mein Assistent Stufe 1+2 würde ich kein diffuses „Memory“ als eigene Black-Box wieder einführen.
+Stattdessen sollte man es explizit auf mehrere Boxen verteilen und im Text benennen.
+
+Wo du es in der Grafik / im Text ergänzen solltest
+
+1. Chat-Frontend & Dialogsteuerung
+
+Ergänzen im Text:
+
+	•	Session Context
+	•	Gesprächsverlauf
+	•	UI-seitige Verlaufssicht
+
+2. Orchestrator-Agent
+
+Hier gehört der wichtigste Teil rein:
+
+	•	Conversation State
+	•	Skill State
+	•	Dialogkontext
+	•	laufender Bearbeitungszustand
+	•	Routing-Kontext
+
+Ich würde dort im Text explizit von „Conversation Memory / Context State“ sprechen.
+
+3. Identity & Consent
+
+Hier:
+
+	•	Consent State
+	•	Rollen-/Attributkontext
+	•	zulässiger Personalisierungsrahmen
+
+4. Integration & Personalization
+
+Hier:
+
+	•	User Context
+	•	profilbezogene Kontexte
+	•	systemseitig gelesene personalisierte Informationen
+
+5. Knowledge & Retrieval
+
+Hier:
+
+	•	kein Gesprächsmemory, aber „Knowledge Memory“ im Sinn des abrufbaren Wissens
+
+6. Wissensdaten-Pipeline
+
+Hier:
+
+	•	Wissensspeicher, Indexe, Metadaten, Freigabestatus
+
+Meine Empfehlung zur Darstellung
+
+Ich würde nicht wieder einfach „Data & Memory“ als einzelne Box ergänzen.
+Besser wären zwei Möglichkeiten:
+
+Variante 1: Im Text sauber verteilen
+
+Das ist architektonisch am saubersten.
+
+Variante 2: Kleine unterstützende Box ergänzen
+
+Falls ihr es grafisch sichtbar machen wollt, dann eher als:
+
+	•	Context & State Services
+	•	oder Context, State & Consent Stores
+
+Diese Box würde dann an Orchestrator, Identity & Consent und Integration & Personalization angebunden.
+
+Das wäre deutlich präziser als „Data & Memory“.
+
+⸻
+
+3. Querschnittsfunktionen ausführlicher — und auf welche Boxen sie wirken
+
+Ja — das sollte man sauberer beschreiben. Der entscheidende Punkt ist:
+
+Nicht jede Querschnittsfunktion wirkt gleich stark auf jede Box.
+Manche wirken wirklich überall, andere vor allem auf bestimmte Bereiche.
+
+Ich gehe sie einzeln durch.
+
+3.1 Security & Privacy
+
+Bedeutung
+
+Diese Querschnittsfunktion umfasst alle Maßnahmen, die Vertraulichkeit, Integrität und Schutz sensibler Daten sicherstellen.
+
+Begriffe
+
+	•	Security = Informationssicherheit
+	•	Privacy = Schutz personenbezogener Daten und datenschutzgerechte Verarbeitung
+	•	Integrität = Daten werden nicht unzulässig verändert
+	•	Vertraulichkeit = nur Berechtigte dürfen zugreifen
+
+Typische Inhalte
+
+	•	Authentifizierung
+	•	sichere Übertragung
+	•	Verschlüsselung
+	•	Schutz vor Datenabfluss
+	•	PII-Schutz
+	•	Mandanten- und Berechtigungstrennung
+	•	Absicherung der Modellnutzung
+	•	Absicherung externer und interner Schnittstellen
+
+Wirkt auf welche Boxen?
+
+Wirkt auf praktisch alle Boxen, aber unterschiedlich stark.
+
+Besonders stark auf:
+
+	•	Kanäle
+	•	Chat-Frontend & Dialogsteuerung
+	•	Input Guardrails
+	•	Identity & Consent
+	•	Integration & Personalization
+	•	Model Layer
+	•	Policy / Compliance
+	•	Output Guardrails
+	•	Wissensdaten-Pipeline
+
+Eher mittelbar auf:
+
+	•	Antwort
+	•	Observability
+
+Beispielhafte Wirkung
+
+	•	Im Kanal: sichere Einbettung, Session-Schutz
+	•	Im Frontend: keine ungesicherten Tokens, Session-Schutz
+	•	In Guardrails: PII-Erkennung
+	•	In Integrationen: abgesicherte API-Zugriffe
+	•	Im Model Layer: kein unzulässiger Datenabfluss
+	•	In der Wissenspipeline: nur freigegebene Inhalte werden indexiert
+
+Formulierung für dein Dokument
+
+Security & Privacy wirkt als übergreifende Schutzfunktion auf nahezu alle Architekturbausteine. Besonders relevant ist sie für Benutzerzugänge, die Verarbeitung sensibler HR-Daten, die Anbindung externer und interner Systeme, die Modellnutzung sowie die Wissensaufbereitung. Ziel ist, dass alle Datenflüsse, Speicherungen und Ausgaben entlang der gesamten Verarbeitungskette abgesichert und datenschutzkonform gestaltet werden.
+
+⸻
+
+3.2 Identity, Access & Consent
+
+Bedeutung
+
+Diese Querschnittsfunktion regelt, wer ein Nutzer ist, worauf er zugreifen darf und unter welchen Bedingungen personenbezogene oder personalisierte Informationen verwendet werden dürfen.
+
+Begriffe
+
+	•	Identity = Identität des Nutzers
+	•	Access = Zugriffssteuerung
+	•	Consent = Einwilligung
+	•	RBAC = rollenbasierte Berechtigung
+	•	ABAC = attributbasierte Berechtigung
+
+Typische Inhalte
+
+	•	Single Sign-On
+	•	Rollen- und Attributermittlung
+	•	Nutzeridentifikation
+	•	Opt-in-Verwaltung
+	•	Zweckbindung
+	•	Prüfung zulässiger Personalisierung
+	•	Scope-Weitergabe an nachgelagerte Systeme
+
+Wirkt auf welche Boxen?
+
+Wirkt nicht auf alles gleich stark.
+
+Direkt auf:
+
+	•	Kanäle
+	•	Chat-Frontend & Dialogsteuerung
+	•	Input Guardrails
+	•	Orchestrator-Agent
+	•	Identity & Consent
+	•	Integration & Personalization
+
+Indirekt auf:
+
+	•	Knowledge & Retrieval
+	•	Output Guardrails
+	•	Policy / Compliance
+	•	Antwort
+
+Nur mittelbar auf:
+
+	•	Observability
+	•	Wissensdaten-Pipeline
+	•	Model Layer
+
+Warum?
+
+	•	Die Identität muss am Einstieg bekannt sein
+	•	Der Orchestrator muss wissen, ob er personalisierte Pfade nehmen darf
+	•	Integrationen dürfen nur mit passenden Berechtigungen erfolgen
+	•	Retrieval kann durch Rollenfilter beeinflusst werden
+	•	Antworten dürfen nur das enthalten, was der Nutzer sehen darf
+
+Wichtiger Architekturhinweis
+
+Diese Funktion wirkt nicht nur einmal am Anfang, sondern mehrstufig:
+
+	1.	beim Einstieg
+	2.	vor Personalisierung
+	3.	vor Integrationszugriff
+	4.	vor Ausgabe sensibler Inhalte
+
+Formulierung für dein Dokument
+
+Identity, Access & Consent wirkt vor allem auf die nutzerbezogenen und personalisierten Verarbeitungswege. Die Funktion greift bereits beim Zugang zum Assistenten, beeinflusst die Orchestrierung zulässiger Verarbeitungswege und ist insbesondere für personalisierte Antworten, Statusabfragen und rollenabhängige Ausgaben entscheidend. Sie wirkt daher nicht nur auf eine einzelne Box, sondern auf mehrere Stationen der Verarbeitungskette.
+
+⸻
+
+3.3 Policy, Compliance & Audit
+
+Bedeutung
+
+Diese Querschnittsfunktion stellt sicher, dass der Assistent innerhalb fachlicher, organisatorischer, regulatorischer und datenschutzrechtlicher Regeln arbeitet.
+
+Begriffe
+
+	•	Policy = Regel, Vorgabe, Richtlinie
+	•	Compliance = Einhaltung dieser Regeln
+	•	Audit = prüfbare Nachvollziehbarkeit
+	•	HITL = Human in the Loop, also menschliche Einbindung an kritischen Stellen
+
+Typische Inhalte
+
+	•	erlaubte und verbotene Nutzungsfälle
+	•	Richtlinien für Personalisierung
+	•	Freigabelogik
+	•	DLP
+	•	Nachvollziehbarkeit von Entscheidungen
+	•	Logging für prüfbare Zugriffe
+	•	Eskalationsregeln
+	•	menschliche Freigabe oder Weiterleitung
+
+Wirkt auf welche Boxen?
+
+Ebenfalls breit, aber nicht völlig gleichmäßig.
+
+Direkt auf:
+
+	•	Input Guardrails
+	•	Orchestrator-Agent
+	•	Identity & Consent
+	•	Integration & Personalization
+	•	Model Layer
+	•	Policy / Compliance
+	•	Output Guardrails
+	•	Antwort
+
+Indirekt auf:
+
+	•	Chat-Frontend & Dialogsteuerung
+	•	Observability
+	•	Wissensdaten-Pipeline
+
+Eher rahmensetzend auf:
+
+	•	Kanäle
+	•	Knowledge & Retrieval
+
+Warum?
+
+	•	Guardrails setzen Policies durch
+	•	Orchestrierung muss regelkonforme Pfade wählen
+	•	Integrationen brauchen Compliance-Grenzen
+	•	Output muss regelkonform sein
+	•	Audit muss Entscheidungen nachvollziehbar machen
+
+Formulierung für dein Dokument
+
+Policy, Compliance & Audit wirkt als regelsetzende und prüfende Querschnittsfunktion insbesondere auf Guardrails, Orchestrierung, personalisierte Integrationen, Modellnutzung und Ausgabekontrolle. Darüber hinaus prägt sie auch die Anforderungen an Logging, Nachvollziehbarkeit, menschliche Eskalation und Freigabemechanismen. Ihre Wirkung ist damit systemweit, jedoch am stärksten in den kontrollierenden und entscheidenden Architekturbausteinen.
+
+⸻
+
+3.4 Observability, Quality & Evaluation
+
+Bedeutung
+
+Diese Querschnittsfunktion sorgt dafür, dass das Verhalten des Systems beobachtet, gemessen und verbessert werden kann.
+
+Begriffe
+
+	•	Observability = Beobachtbarkeit
+	•	Tracing = Nachverfolgung einzelner Verarbeitungsschritte
+	•	Evaluation = systematische Bewertung
+	•	Qualität = Antwortgüte, Relevanz, Korrektheit, Stabilität
+
+Typische Inhalte
+
+	•	technische Telemetrie
+	•	Fehlerraten
+	•	Antwortzeiten
+	•	Retrieval-Qualität
+	•	Guardrail-Treffer
+	•	Halluzinationsindikatoren
+	•	Nutzerfeedback
+	•	Qualitätsbewertungen durch Fachseite
+	•	Handover-Raten
+	•	Kosten pro Anfrage oder Use Case
+
+Wirkt auf welche Boxen?
+
+Diese Funktion wirkt tatsächlich fast auf alles.
+
+Direkt auf nahezu alle Boxen:
+
+	•	Kanäle
+	•	Chat-Frontend & Dialogsteuerung
+	•	Input Guardrails
+	•	Orchestrator-Agent
+	•	Knowledge & Retrieval
+	•	Integration & Personalization
+	•	Model Layer
+	•	Policy / Compliance
+	•	Output Guardrails
+	•	Antwort
+	•	Wissensdaten-Pipeline
+	•	Observability
+
+Warum?
+
+Weil jede dieser Komponenten Daten liefert, die für Steuerung und Verbesserung wichtig sind:
+
+	•	Frontend liefert Nutzungsverhalten
+	•	Retrieval liefert Trefferqualität
+	•	Modell liefert Latenzen und Kosten
+	•	Integrationen liefern Fehler und Timeouts
+	•	Guardrails liefern Blockraten
+	•	Wissenspipeline liefert Indexfrische und Datenqualität
+
+Formulierung für dein Dokument
+
+Observability, Quality & Evaluation wirkt über die gesamte Architektur hinweg. Sie ist keine punktuelle Zusatzfunktion, sondern die Grundlage für einen beherrschbaren und kontinuierlich verbesserbaren Betrieb. Nahezu alle Architekturbausteine erzeugen relevante Beobachtungs- und Qualitätsdaten, die für Betrieb, Fachsteuerung und Weiterentwicklung ausgewertet werden müssen.
+
+⸻
+
+3.5 Delivery, Betrieb & Governance
+
+Bedeutung
+
+Diese Querschnittsfunktion beschreibt, wie die Lösung technisch und organisatorisch betrieben, weiterentwickelt und gesteuert wird.
+
+Begriffe
+
+	•	Delivery = Bereitstellung und Auslieferung
+	•	Governance = Steuerung durch Regeln, Verantwortlichkeiten und Freigaben
+	•	FinOps = Kostensteuerung und wirtschaftlicher Betrieb von Cloud-/KI-Diensten
+	•	Change Management = kontrollierte Änderungen
+
+Typische Inhalte
+
+	•	Dev-, Test- und Produktivumgebungen
+	•	Deployment-Prozesse
+	•	Prompt-Versionierung
+	•	Konfigurationsverwaltung
+	•	Freigabeprozesse
+	•	Incident Management
+	•	Betriebsverantwortung
+	•	Kostenmonitoring
+	•	Architekturentscheidungen und Standards
+
+Wirkt auf welche Boxen?
+
+Auch sehr breit, aber vor allem auf Betriebs- und Änderbarkeitsebene.
+
+Direkt auf:
+
+	•	Chat-Frontend & Dialogsteuerung
+	•	Orchestrator-Agent
+	•	Knowledge & Retrieval
+	•	Integration & Personalization
+	•	Model Layer
+	•	Policy / Compliance
+	•	Output Guardrails
+	•	Wissensdaten-Pipeline
+	•	Observability
+
+Indirekt auf:
+
+	•	Kanäle
+	•	Identity & Consent
+	•	Antwort
+
+Warum?
+
+Diese Funktion regelt weniger den einzelnen Laufzeitentscheid, sondern den geordneten Betrieb und die kontrollierte Weiterentwicklung der Bausteine.
+
+Formulierung für dein Dokument
+
+Delivery, Betrieb & Governance wirkt vor allem auf die technischen Kernbausteine der Lösung sowie auf ihre kontrollierte Weiterentwicklung. Die Funktion regelt nicht primär die fachliche Antworterzeugung, sondern den stabilen Betrieb, die saubere Versionierung, die Freigabe von Änderungen, die Kostensteuerung und die Einhaltung architektonischer Standards.
+
+⸻
+
+4. Mein konkreter Vorschlag für eure Grafik und den Text
+
+Ich würde im nächsten Dokumentstand Folgendes tun:
+
+Zur Box „Antwort“
+
+Umbenennen in:
+„Antwortaufbereitung & Übergabe“
+oder
+„Response Assembly & Delivery“
+
+Zum Thema Memory
+
+Im Text explizit aufnehmen:
+
+	•	Session Memory in Chat-Frontend & Dialogsteuerung
+	•	Conversation State / Context Memory im Orchestrator
+	•	Consent- und Rollenstatus in Identity & Consent
+	•	User Context in Integration & Personalization
+	•	Knowledge State / Indexe / Metadaten in Knowledge & Retrieval sowie Wissensdaten-Pipeline
+
+Optional grafisch eine zusätzliche unterstützende Box:
+„Context, State & Consent Stores“
+
+Zu den Querschnittsfunktionen
+
+Im Text jeweils explizit angeben:
+
+	•	wirkt systemweit
+	•	wirkt schwerpunktmäßig auf bestimmte Boxen
+	•	Beispiele für diese Wirkung
+
+⸻
+
+5. Kurzantwort auf deine drei Punkte
+
+Zur ersten Frage:
+Ja, die Box „Antwort“ ist aktuell zu nah am Frontend. Sie ist nur dann sinnvoll, wenn ihr sie als fachlich freigegebenes Antwortobjekt versteht. Sonst kann sie entfallen oder sollte umbenannt werden.
+
+Zur zweiten Frage:
+„Data & Memory“ ist nicht weg, sondern verteilt. Vor allem steckt es in:
+
+	•	Chat-Frontend & Dialogsteuerung
+	•	Orchestrator-Agent
+	•	Identity & Consent
+	•	Integration & Personalization
+	•	Knowledge & Retrieval
+	•	Wissensdaten-Pipeline
+
+Zur dritten Frage:
+Ja, die Querschnittsfunktionen sollten ausführlicher beschrieben werden — und vor allem mit dem Hinweis, dass sie nicht alle Boxen gleich stark beeinflussen. Manche wirken nahezu überall, manche primär auf Identitäts-, Kontroll- oder Betriebsbausteine.
+
+Wenn du möchtest, schreibe ich dir daraus jetzt direkt einen überarbeiteten Dokumententext für die Boxen und Querschnittsfunktionen, schon in einer Form, die du fast 1:1 in Word übernehmen kannst.
