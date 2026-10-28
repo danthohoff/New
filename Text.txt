@@ -1,0 +1,207 @@
+Ich würde den Workshop jetzt bewusst eine Ebene tiefer ansetzen: Nicht nur welche Komponenten brauchen wir?, sondern auch welche Fähigkeiten muss unser HR Orchestrator besitzen, welche Informationen muss er behalten, wie trifft er Entscheidungen und wie arbeitet er sicher mit den nativen Agenten unserer HR-Systeme zusammen?
+Dafür würde ich die Präsentation als Architektur- und Diskussionsgrundlage mit etwa 12 Folien aufbauen. Der Inhalt sollte bereits konkrete Vorschläge enthalten, aber die offenen Entscheidungen sichtbar lassen.
+Die wichtigste Leitidee für die Diskussion:
+Wir bauen keinen übergeordneten Super-Agenten, der alles selbst erledigt. Wir bauen eine kontrollierte Orchestrierungsschicht, die Mitarbeiteranliegen in verlässliche HR-Prozesse übersetzt und dafür die richtigen Systeme, Agenten und Funktionen koordiniert.
+Folie 1 – Zielbild und Ambition
+Titel: HR AI Orchestration – vom Mitarbeiteranliegen zum Ende-zu-Ende-Prozess
+Text auf der Folie
+Unser Ziel ist, dass Mitarbeiter ihre HR-Anliegen über Microsoft 365 Copilot in natürlicher Sprache einbringen können. Der HR Orchestrator steuert die Bearbeitung über die relevanten HR-Systeme und deren native Agenten.
+	•	Ein zentraler, verständlicher Zugang für Mitarbeiter
+	•	Unterschiedliche HR-Systeme und Agenten integriert nutzen
+	•	Einfache Anliegen schnell beantworten, komplexe Prozesse systemübergreifend steuern
+	•	Prozessstatus, Berechtigungen, Freigaben und Fehlerbehandlung durchgängig sicherstellen
+	•	Bestehende Investitionen in ServiceNow, Oracle HCM, Avature und weitere HR-Systeme nutzen
+Kernaussage für die Diskussion
+Wir zentralisieren das Mitarbeitererlebnis und die Prozesssteuerung – nicht zwangsläufig sämtliche Agenten, Daten oder Fachlogik.
+Frage an die Runde: Was soll der Mitarbeiter künftig tatsächlich als einheitlich erleben: nur den Einstieg oder auch Status, Rückfragen, Genehmigungen und die gesamte Fallbearbeitung?
+Folie 2 – In welchen Architekturebenen müssen wir denken?
+Titel: Das Zielbild besteht aus mehreren logisch getrennten Ebenen
+1. Employee Experience
+Microsoft 365 Copilot · Dialog · Rückfragen · Antwort
+2. HR Orchestration Layer
+Verstehen · Entscheiden · Planen · Koordinieren · Prozessstatus halten · Überwachen
+3. Integration & Capability Layer
+APIs · Events · MCP-Server · gegebenenfalls A2A · Adapter · Authentifizierung
+4. HR-Fachsysteme und native Agenten
+ServiceNow · Oracle HCM · Avature · ASES · weitere Systeme
+Querschnitt über alle Ebenen: Identität und Berechtigungen, Datenschutz, Audit, Monitoring, Qualitätssicherung und Betrieb.
+Wichtig: Das sind logische Ebenen, keine Vorgabe, vier separate Produkte zu kaufen. Ein Produkt kann mehrere Ebenen abdecken.
+Diskussionsfrage: Welche dieser Ebenen existieren bei uns bereits – und welche Fähigkeit fehlt tatsächlich?
+Folie 3 – Was gehört in den Orchestrator und was nicht?
+Titel: Zentrale Steuerung statt zentraler Super-Agent
+Gehört in den Orchestrator	Bleibt möglichst im Fachsystem
+Prozessschritte und Reihenfolge	HR-Fachregeln und Berechnungen
+Auswahl der benötigten Fähigkeiten	Führende Mitarbeiter- und Falldaten
+Status des Gesamtprozesses	Native Workflows und Transaktionen
+Aufruf und Koordination von Agenten/APIs	Fachspezifische Prüfungen
+Wiederholungen, Timeouts und Eskalationen	Ausführung der konkreten Systemaktion
+Gesamtstatus und Ergebnis für Copilot	Fachliche Datenhoheit und systemeigener Audit
+Der Orchestrator entscheidet beispielsweise, dass eine Adressänderung in System A vorgenommen und anschließend ein Folgeprozess in System B angestoßen werden muss. Er sollte aber nicht die Fachlogik beider Systeme neu implementieren.
+Leitprinzip: Der Orchestrator steuert den Prozess; die Fachsysteme bleiben für ihre Daten und fachlichen Aktionen verantwortlich.
+Diskussionsfrage: Welche Entscheidungen sollen zentral getroffen werden, und welche müssen aus Compliance- oder Fachgründen beim jeweiligen HR-System verbleiben?
+Folie 4 – Welche Fähigkeiten muss der HR Orchestrator besitzen?
+Titel: Capability-Modell des HR Orchestrators
+Ich würde die Anforderungen in acht Fähigkeitsbereiche aufteilen. Das ist die zentrale Folie, um aus einem abstrakten „Orchestrator“ eine konkrete Anforderungsliste zu machen.
+1. Verstehen und klassifizieren
+Anliegen, Absicht und gewünschtes Ergebnis erkennen; fehlende Informationen identifizieren; Rückfragen initiieren; relevante Kontextinformationen berücksichtigen.
+2. Planen und routen
+Den passenden Prozess, die benötigten Fähigkeiten und die Reihenfolge auswählen; parallele Schritte erlauben; bei unklaren oder riskanten Fällen an Menschen übergeben.
+3. Agenten und Tools aufrufen
+Native Agenten, APIs, MCP-Tools und Events über klar definierte Verträge ansprechen; Eingaben validieren; Ergebnisse strukturiert entgegennehmen.
+4. Zustand und Kontext verwalten
+Aktuellen Prozessstatus, offene Aufgaben, benötigte Informationen, Ergebnisse, Genehmigungen und Referenzen zuverlässig speichern.
+5. Sicherheit und Richtlinien durchsetzen
+Identität und Berechtigungen berücksichtigen, Daten minimieren, Schreibaktionen kontrollieren, Freigaben erzwingen und sensible Aktionen nachvollziehbar machen.
+6. Fehler und Ausnahmen beherrschen
+Timeouts, Wiederholungen, doppelte Events, Teilfehler, Kompensationsschritte, Eskalationen und Wiederaufnahme nach Unterbrechungen unterstützen.
+7. Mit Copilot und Menschen kommunizieren
+Verständliche Statusmeldungen liefern, Rückfragen ermöglichen, Genehmigungen einholen und bei Unsicherheit an HR-Mitarbeiter übergeben.
+8. Qualität und Betrieb sicherstellen
+Ende-zu-Ende-Tracing, Audit, Metriken, Testfälle, Agenten-/Tool-Versionen, Qualitätsbewertung und kontrollierte Änderungen unterstützen.
+Diskussionsfrage: Welche dieser Fähigkeiten müssen bereits im ersten Pilot vollständig vorhanden sein – und welche können zunächst einfach umgesetzt und später ausgebaut werden?
+Meine Empfehlung: Prozesszustand, Sicherheit, Tool-Aufrufe, Fehlerbehandlung und Audit sind keine späteren Komfortfunktionen. Sie müssen im ersten produktionsnahen Pilot berücksichtigt werden.
+Folie 5 – Memory: Was muss der Orchestrator sich merken?
+Titel: Memory ist nicht gleich Prozessstatus
+Das Thema Memory wird bei Agenten oft zu undifferenziert diskutiert. Für die Architektur sollten wir mindestens vier Arten unterscheiden.
+Art	Was wird gespeichert?	Beispiel	Empfehlung
+1. Gesprächskontext	Informationen aus der laufenden Interaktion	Mitarbeiter erklärt, welches Anliegen er hat	Für den aktiven Dialog nötig
+2. Prozessgedächtnis / State	Dauerhafter Status, Schritte, Ergebnisse und offene Aufgaben	Freigabe ausstehend; Oracle-Schritt abgeschlossen	Für systemübergreifende Prozesse essenziell
+3. Wissenszugriff	Referenzen auf Richtlinien, FAQ, Prozessbeschreibungen	Welche Regel gilt bei einer Adressänderung?	Über kontrolliertes Retrieval, z. B. RAG
+4. Langfristige Präferenzen	Nur explizit benötigte, zulässige Informationen über frühere Interaktionen	Bevorzugte Sprache, sofern zulässig und nützlich	Optional; nicht als Voraussetzung für den Start
+Die wichtigste Unterscheidung: Der Orchestrator benötigt vor allem ein verlässliches, persistentes Prozessgedächtnis. Er muss sich nicht automatisch alle Mitarbeitergespräche dauerhaft merken.
+Für einen laufenden Prozess sollten beispielsweise gespeichert werden:
+	•	Prozess-ID und referenzierter Mitarbeiter/Fall
+	•	aktueller Status und bereits abgeschlossene Schritte
+	•	ausstehende Aufgaben, Fristen und verantwortliche Stelle
+	•	validierte Ergebnisse und Referenzen auf Quelldaten
+	•	Freigaben, Zeitstempel und Korrelations-IDs
+	•	Fehler, Wiederholungen und nächste zulässige Aktion
+Dabei sollte der Orchestrator sensible HR-Daten nicht unnötig duplizieren. Häufig reichen Referenzen auf die führenden Systeme und die Informationen, die zur Fortsetzung des Prozesses benötigt werden.
+Diskussionsfragen
+	•	Welche Daten müssen über mehrere Stunden oder Tage erhalten bleiben?
+	•	Wo wird der verbindliche Prozesszustand gespeichert?
+	•	Was darf über Gespräche hinweg erinnert werden – und was ausdrücklich nicht?
+	•	Welche Wissensquellen sind freigegeben und aktuell?
+	•	Wie lange werden Status-, Audit- und Kontextdaten aufbewahrt?
+Folie 6 – Wie intelligent und autonom soll der Orchestrator sein?
+Titel: Nicht jeder Schritt benötigt einen autonomen Agenten
+Ein häufiger Architekturfehler ist, jede Aufgabe als Agentenproblem zu behandeln. Für HR-Prozesse ist ein hybrides Modell in der Regel besser.
+Deterministische Workflow-Steuerung
+Wird verwendet, wenn die Reihenfolge, Bedingungen und Aktionen klar definiert sind.
+Beispiel: Antrag erfassen → Genehmigung abwarten → Status aktualisieren → Mitarbeiter informieren.
+Agentische Entscheidungsunterstützung
+Wird verwendet, wenn Anliegen interpretiert, Dokumente ausgewertet, fehlende Informationen erkannt oder passende Fähigkeiten ausgewählt werden müssen.
+Beispiel: Freitextanliegen verstehen und den passenden HR-Prozess vorschlagen.
+Human-in-the-loop
+Wird verwendet, wenn eine fachliche Entscheidung, eine Genehmigung oder eine Klärung erforderlich ist.
+Beispiel: Eine sensible Änderung kann nicht ohne die dafür vorgesehene Freigabe ausgeführt werden.
+Empfehlung: Der Orchestrator kann KI für Interpretation und Routing nutzen, sollte aber die Ausführung kritischer Prozessschritte durch explizite Regeln, Berechtigungsprüfungen und kontrollierte Workflow-Schritte absichern.
+Diskussionsfrage: Bei welchen HR-Anliegen darf das System selbstständig handeln, wo darf es nur vorbereiten und wo ist eine menschliche Freigabe zwingend?
+Folie 7 – MCP, APIs, Events und Agent-zu-Agent-Kommunikation
+Titel: Welche Integrationsmechanismen benötigen wir?
+Wir sollten nicht versuchen, sämtliche Verbindungen über einen einzigen Standard abzuwickeln. Die Integrationsart sollte zum Anwendungsfall passen.
+Mechanismus	Zweck	Typischer Einsatz
+REST API	Definierte Funktion aufrufen	Mitarbeiterdaten lesen, HR-Antrag anlegen
+Events / Webhooks	Änderungen und Fortschritt melden	Genehmigung abgeschlossen, Aufgabe fehlgeschlagen
+MCP	Tools und Ressourcen für kompatible KI-Clients standardisiert bereitstellen	HR-Funktionen für einen unterstützten Agenten verfügbar machen
+A2A	Aufgaben zwischen kompatiblen Agenten delegieren	Ein externer Agent übernimmt eine klar abgegrenzte Teilaufgabe
+Workflow Engine	Mehrstufige Prozesse mit Zustand und Fehlerpfaden steuern	Onboarding über mehrere Systeme hinweg
+Unsere Startempfehlung
+	•	Bestehende APIs und Events zuerst prüfen.
+	•	MCP dort einsetzen, wo es für die vorgesehene Copilot-/Agent-Integration einen konkreten Vorteil bietet.
+	•	A2A nicht allein deshalb einführen, weil mehrere Agenten existieren.
+	•	Die Workflow Engine als verantwortliche Instanz für den Gesamtprozess festlegen.
+Diskussionsfrage: Welche dieser Integrationsmöglichkeiten werden von unseren konkreten Systemversionen, Lizenzen und dem vorgesehenen Microsoft-365-Copilot-Erweiterungsweg tatsächlich unterstützt?
+Folie 8 – Was bedeutet ein zentraler HR Orchestrator technisch?
+Titel: Welche technischen Komponenten brauchen wir?
+Hier würde ich zwischen den notwendigen Kernkomponenten und optionalen Erweiterungen unterscheiden.
+Kern für den ersten produktionsnahen Pilot
+	•	Workflow Engine mit persistentem Prozesszustand
+	•	Routing- und Entscheidungslogik mit klaren Regeln
+	•	API-/Tool-Integration und Schema-Validierung
+	•	Identität, Berechtigungen und kontrollierte Schreibaktionen
+	•	Fehlerbehandlung, Timeouts, idempotente Wiederholungen und Eskalationen
+	•	Audit, Logging, Monitoring und Ende-zu-Ende-Korrelation
+	•	Rückkanal zum Copilot für Status und Ergebnis
+Je nach Bedarf ergänzen
+	•	Agent-/Capability-Registry mit Beschreibungen, Berechtigungen und Versionen
+	•	RAG / Wissenszugriff auf freigegebene HR-Richtlinien
+	•	Langfristige Mitarbeiterpräferenzen bzw. personalisiertes Memory
+	•	Semantisches Routing oder dynamische Planung durch ein LLM
+	•	Mehrere fachliche MCP-Server
+	•	Agentenbewertung, automatisierte Regressionstests und Kostenoptimierung
+Wichtige Einordnung: Eine Registry muss am Anfang kein neues Produkt sein. Ein kontrollierter Katalog der freigegebenen Fähigkeiten mit Besitzer, Schnittstelle, Berechtigung und Version kann für den Pilot ausreichen.
+Ebenso ist ein separates Vektordatenbank- oder Langzeit-Memory-System nicht automatisch notwendig. Für viele erste Anwendungsfälle genügen strukturierte Prozessdaten und ein kontrollierter Zugriff auf vorhandene Wissensquellen.
+Diskussionsfrage: Welche Komponenten sind bereits in unserer bestehenden Plattform enthalten, und welche müssten wir tatsächlich neu aufbauen?
+Folie 9 – Wie wählen wir den Orchestrator aus?
+Titel: Plattformentscheidung: vorhandene Möglichkeiten vor Eigenentwicklung
+Wir sollten dieselben Anforderungen an die realistischen Plattformoptionen anlegen.
+Kriterium	ServiceNow	Azure Logic Apps / Microsoft-Integration	Bestehende iPaaS / eigene Lösung
+HR-Service- und Case-Integration	Besonders prüfen, wenn bereits zentral	Über Integrationen möglich	Abhängig vom Produkt
+Systemübergreifende Workflow-Steuerung	Vorhandene Workflows und Module prüfen	Stateful Workflows und Integrationen prüfen	Produktabhängig
+Integration von Agenten und Tools	Native Agenten und externe Anbindungen prüfen	APIs, Connectoren und unterstützte Agentenmechanismen prüfen	Produktabhängig
+Prozessstatus und Fehlerbehandlung	Konkrete Funktionen und Lizenzen verifizieren	Konkrete Funktionen und Betrieb verifizieren	Produktabhängig
+Anbieterneutralität	Fachliche und technische Kopplung bewerten	Microsoft-/Azure-Abhängigkeit bewerten	Je nach Plattform
+Betriebsaufwand und Kosten	Lizenz und vorhandene Betriebsorganisation	Azure-Verbrauch und Betriebsmodell	Betrieb bzw. Entwicklungsaufwand
+Entscheidungsvorschlag
+	•	ServiceNow prüfen, wenn es bereits euer zentraler HR-Service- und Workflow-Hub ist.
+	•	Azure Logic Apps prüfen, wenn eine neutrale, systemübergreifende Prozesssteuerung auf vorhandener Azure-Basis besser passt.
+	•	Vorhandene Integrationsplattformen berücksichtigen, bevor ein neues System eingeführt wird.
+	•	Eine Eigenentwicklung erst rechtfertigen, wenn Standardplattformen konkrete Anforderungen nicht erfüllen.
+Diskussionsfrage: Welches System soll künftig den verbindlichen Prozessstatus besitzen – und welches Team trägt die Verantwortung für dessen Betrieb?
+Folie 10 – Sicherheit, Datenschutz und Governance
+Titel: Vertrauen und Kontrolle sind Architekturmerkmale
+Ein HR Orchestrator kann über Systeme hinweg Aktionen auslösen und personenbezogene Daten verarbeiten. Deshalb muss Sicherheit Bestandteil des Designs sein, nicht eine spätere Ergänzung.
+Mindestanforderungen
+	•	Identität: Ist nachvollziehbar, welcher Mitarbeiter beziehungsweise welcher Prozess eine Aktion veranlasst?
+	•	Berechtigungen: Darf dieser Mitarbeiter die angeforderten Daten sehen oder die Aktion ausführen?
+	•	Minimale Rechte: Jede Integration erhält nur die tatsächlich benötigten Berechtigungen.
+	•	Freigaben: Kritische Schreibaktionen und fachlich sensible Entscheidungen folgen definierten Genehmigungsregeln.
+	•	Datenminimierung: Nur die Daten weitergeben und speichern, die der Prozess benötigt.
+	•	Auditierbarkeit: Anfrage, verwendete Fähigkeit, Ergebnis, Freigabe und Fehler nachvollziehen können.
+	•	Prompt-Injection-Schutz: Inhalte aus Dokumenten oder externen Systemen nicht als vertrauenswürdige Steuerungsanweisungen behandeln.
+	•	Lebenszyklus: Änderungen an Tools, Prompts, Agenten und Workflows testen, versionieren und kontrolliert freigeben.
+Diskussionsfragen
+	•	Welche Aktionen gelten als besonders sensibel?
+	•	Wo müssen HR, Datenschutz, Informationssicherheit und gegebenenfalls Arbeitnehmervertretung eingebunden werden?
+	•	Welche Informationen dürfen im Prozessstatus gespeichert werden?
+	•	Wer genehmigt neue Agentenfähigkeiten und deren Zugriffsrechte?
+Folie 11 – Womit starten wir konkret?
+Titel: Ein Pilot, der Architekturentscheidungen beantwortet
+Ich würde nicht mit einem generischen „HR-Agenten für alles“ starten. Wählt einen Prozess, der einen klaren Nutzen hat und genug Komplexität zeigt, um die Orchestrierung zu validieren.
+Schritt 1 – Use Cases inventarisieren
+Für jeden Kandidaten erfassen: Mitarbeiteranliegen, beteiligte Systeme, native Fähigkeiten, APIs/Events, Datenarten, Freigaben und erwarteter Nutzen.
+Schritt 2 – Zwei Pilotkandidaten wählen
+Ein einfacher lesender Use Case zum Validieren von Identität, Tool-Aufruf und Antwort; ein systemübergreifender Use Case zum Validieren von Zustand, Events und Fehlerbehandlung.
+Schritt 3 – Minimalarchitektur umsetzen
+Eine Orchestrierungsplattform, eine kleine Zahl freigegebener Funktionen, persistenter Prozessstatus, Authentifizierung, Monitoring und definierte Fehlerpfade.
+Schritt 4 – Nach messbaren Kriterien bewerten
+Erfolgsquote, Durchlaufzeit, Fehler- und Eskalationsrate, Nutzerzufriedenheit, Berechtigungsfehler und Aufwand für Betrieb und Änderungen.
+Vorgeschlagene Reihenfolge: Bestandsaufnahme → Pilotprozess → Orchestrator-Entscheidung → Minimalintegration → Sicherheitstest → Auswertung → Skalierung.
+Folie 12 – Offene Fragen und Workshop-Ergebnis
+Titel: Welche Entscheidungen müssen wir heute treffen?
+Ich würde die Diskussion entlang dieser sechs Fragen moderieren.
+1. Use Cases
+Welche zwei HR-Prozesse haben den höchsten Nutzen und eignen sich als Pilot?
+2. Orchestrator
+ServiceNow, Azure Logic Apps oder eine vorhandene Integrationsplattform – welche Optionen prüfen wir konkret?
+3. Integration
+Welche APIs, Events, MCP-Schnittstellen und nativen Agenten stehen tatsächlich zur Verfügung?
+4. Memory und Daten
+Welche Prozessdaten müssen dauerhaft gespeichert werden? Welche Wissensquellen und langfristigen Erinnerungen sind zulässig?
+5. Governance
+Wer ist für Rechte, Freigaben, Audit, Datenschutz und Betrieb verantwortlich?
+6. Ownership und nächste Schritte
+Wer übernimmt Architektur, Prozessdesign, Integration und Security – und bis wann?
+Das konkrete Workshop-Ergebnis sollte sein:
+	•	Ein gemeinsames Architektur-Zielbild
+	•	Zwei priorisierte Pilotkandidaten
+	•	Ein benannter Verantwortlicher für die Architekturentscheidung
+	•	Eine kurze Liste der technischen Prüfungen
+	•	Ein Plan mit Verantwortlichen und Terminen
+Zusatz für deine Moderation: drei Fragen, bei denen ich besonders aufpassen würde
+Diese Fragen können die Diskussion schnell in technische Details ziehen. Ich würde sie bewusst in dieser Reihenfolge behandeln:
+	•	„Brauchen wir Memory?“ – Ja, für den dauerhaften Prozesszustand. Nein, nicht automatisch für ein dauerhaftes persönliches Gedächtnis über alle Mitarbeitergespräche.
+	•	„Brauchen wir MCP?“ – Vielleicht. Zuerst prüfen, welche Schnittstellen und welcher Copilot-Erweiterungsweg verfügbar sind. MCP ist eine Integrationsentscheidung, nicht die Architektur selbst.
+	•	„Welchen Orchestrator kaufen wir?“ – Erst entscheiden, wer den Prozesszustand und die Ende-zu-Ende-Verantwortung übernimmt. Dann die Plattformen anhand desselben Pilotprozesses vergleichen.
+Wenn du möchtest, kann ich dich nach dem Workshop wöchentlich an offene Architekturentscheidungen, Risiken und vereinbarte Meilensteine erinnern, damit aus den Ergebnissen ein konkreter Umsetzungsplan wird.
